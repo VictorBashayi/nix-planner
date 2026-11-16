@@ -7,6 +7,7 @@ uses roughly 5 MB of private memory.
 ## Features
 
 - **Buckets:** Today, This week, Someday and Done.
+- **Profiles:** separate sets of tasks, such as Personal, Work and School. Click the profile name in the title bar to switch, add, rename or delete one, or press `Ctrl+Tab` for the next. A task's "…" menu can send it to another profile. Deleting a profile deletes its tasks, after a second click to confirm. Reminders fire for every profile.
 - **Quick add:** type in the box at the top. Pick the bucket with the chips or `Ctrl+1/2/3`.
 - **Editing:** click a title or note to edit it. `Enter` saves, `Esc` reverts, and an empty title deletes the task.
 - **Drag and drop:** press, hold briefly, then drag a task to reorder it or move it to another bucket.
@@ -18,9 +19,11 @@ uses roughly 5 MB of private memory.
 
 ### Desktop widget
 
-A transparent card on the desktop shows today's open tasks. Tick one to complete it.
+A transparent card on the desktop shows today's open tasks for the profile on show. Tick one to complete it.
 
 - Win+D (Show desktop) leaves it in place.
+- It stays below your other windows and out of Alt+Tab, and Windows can't snap or maximise it.
+- Only the header, the task rows and the grip take clicks. The rest of its rectangle is click-through, so desktop icons under it still work.
 - The text switches between light and dark to stay readable on your wallpaper.
 - Drag the header to move it, use the corner grip to resize it, and double-click the header to open the planner.
 - It remembers its position and size.

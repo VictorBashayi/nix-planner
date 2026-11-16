@@ -22,8 +22,25 @@ Same file and JSON shape as the Electron app, so tasks carry over and either app
 `%APPDATA%\quick-planner\planner-tasks.json`
 (`tasks[] {id,text,desc,bucket,completed,createdAt,completedAt?,previousBucket?,due?,reminded?}`,
 see `due-dates.md` for the last two),
-`selectedBucket`, `collapsed`, `nextId`). Saves are debounced (300 ms) and atomic
+`selectedBucket`, `collapsed`, `nextId`, `widget`, `profiles[] {id,name}`, `profile`). Each
+task has a `profile` id; files from before profiles load with everything in profile 0,
+"Personal". Saves are debounced (300 ms) and atomic
 (write temp file, rename).
+
+## Profiles
+- One profile is on show at a time; buckets, search, counts, Clear and the widget all work
+  on that profile only. Reminders and the midnight roll-over cover every profile.
+- The switcher is the profile name in the title bar. New and Rename turn the name into a
+  text box in place. Delete is two clicks: the menu, then the footer's "Delete X and its N
+  tasks?" within 5 seconds.
+- Undo history restarts on a switch, so Ctrl+Z never changes tasks that are out of sight.
+
+## Desktop widget
+A second window that `tend_widget` keeps in line on every 5 s tick, since winit rewrites
+window styles and the desktop goes away when Explorer restarts: owned by Progman (survives
+Win+D), tool window (no Alt+Tab), no minimise/maximise box (no snap), bottom of the
+z-order, excluded from capture. `shape_widget` sets a window region covering the header,
+rows and grip, so the empty part of its rectangle passes clicks to the desktop.
 
 ## Tech
 - Rust + Slint, software renderer, winit backend. No GPU context, no web engine.

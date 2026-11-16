@@ -35,6 +35,8 @@ struct App {
     day: Cell<Option<due::Date>>,
     /// How urgent each due task was at the last refresh, to spot labels going stale.
     urgencies: RefCell<Vec<(u64, due::Urgency)>>,
+    /// The widget's size and inked height when its click-through shape was last set.
+    shape: Cell<[i32; 3]>,
 }
 
 impl App {
@@ -89,6 +91,9 @@ impl App {
                 } else {
                     due::label(d, today, minute)
                 };
+                // Say which profile it is from when that isn't the one on show.
+                let state = self.state.borrow();
+                let when = if t.profile == state.profile { when } else { format!("{when} · {}", state.profile_name(t.profile)) };
                 (t.text.clone(), when, t.desc.lines().next().unwrap_or_default().to_string(), Some(t.id))
             }
             _ => {
@@ -107,6 +112,39 @@ impl App {
         });
     }
 
+    /// After the profile on show changes. Undo starts afresh, so it never changes
+    /// tasks that are out of sight.
+    fn switched(self: &Rc<Self>) {
+        *self.history.borrow_mut() = History::new(&self.state.borrow().tasks);
+        self.ui().set_offer_undo(false);
+        self.refresh();
+        self.schedule_save();
+    }
+
+    /// Keeps the widget a well-behaved part of the desktop; see `tend_widget`. Runs on
+    /// every tick because the widget loses its owner when Explorer restarts, and hiding
+    /// then showing it makes a new native window.
+    fn tend(self: &Rc<Self>) {
+        let Some(widget) = self.widget.upgrade() else { return };
+        if !widget.window().is_visible() {
+            return;
+        }
+        let Some(h) = widget.window().with_winit_window(hwnd).flatten() else { return };
+        tend_widget(h);
+        // Off every monitor after a display change: back to the default corner.
+        widget.window().with_winit_window(|w| {
+            if w.outer_position().is_ok_and(|p| !on_screen(w, p.x + 40, p.y + 10)) {
+                place_widget(w, None);
+            }
+        });
+        let scale = widget.window().scale_factor();
+        let size = widget.window().size();
+        let shape = [size.width as i32, size.height as i32, (widget.get_ink_height() * scale).ceil() as i32];
+        if self.shape.replace(shape) != shape {
+            shape_widget(h, shape, (24.0 * scale).ceil() as i32);
+        }
+    }
+
     fn schedule_save(self: &Rc<Self>) {
         let app = Rc::downgrade(self);
         self.save_timer.start(TimerMode::SingleShot, Duration::from_millis(300), move || {
@@ -123,8 +161,9 @@ impl App {
         }
     }
 
-    fn refresh(&self) {
+    fn refresh(self: &Rc<Self>) {
         let ui = self.ui();
+        ui.set_today(today().into());
         let state = self.state.borrow();
         let now = store::now_ms();
         let days = local_day(now).zip(local_day(now - 86_400_000));
@@ -176,6 +215,20 @@ impl App {
         });
         ui.set_status(status_text(state.counts()).into());
         ui.set_has_done(state.counts().1 > 0);
+        ui.set_profiles(ModelRc::new(VecModel::from(
+            state
+                .profiles
+                .iter()
+                .map(|p| ProfileItem {
+                    id: p.id as i32,
+                    name: p.name.as_str().into(),
+                    open: state.tasks.iter().filter(|t| t.profile == p.id && !t.completed).count() as i32,
+                    current: p.id == state.profile,
+                })
+                .collect::<Vec<_>>(),
+        )));
+        ui.set_profile_name(state.profile_name(state.profile).into());
+        ui.set_profile_tasks(state.tasks.iter().filter(|t| t.profile == state.profile).count() as i32);
 
         // The widget shows today's open tasks, as many as fit its height.
         let w = self.widget.upgrade().expect("widget outlives app state");
@@ -194,12 +247,15 @@ impl App {
                 .collect::<Vec<_>>(),
         )));
         w.set_today(today().into());
+        w.set_profile(if state.profiles.len() > 1 { state.profile_name(state.profile).into() } else { SharedString::new() });
         *self.urgencies.borrow_mut() = urgencies(&state, date, minute);
+        drop(state);
+        // The rows just changed, and so has the part of the widget that takes clicks.
+        self.tend();
     }
 
-    fn show(&self) {
+    fn show(self: &Rc<Self>) {
         let ui = self.ui();
-        ui.set_today(today().into());
         // Completion labels say "today"/"yesterday", so refresh them across midnight.
         self.refresh();
         if ui.show().is_err() {
@@ -220,7 +276,7 @@ impl App {
         self.ui().hide().ok();
     }
 
-    fn toggle(&self) {
+    fn toggle(self: &Rc<Self>) {
         if self.visible.get() { self.hide() } else { self.show() }
     }
 
@@ -363,24 +419,108 @@ fn hwnd(w: &winit::window::Window) -> Option<windows_sys::Win32::Foundation::HWN
     }
 }
 
-/// Makes the desktop the widget's owner so Win+D leaves it in place, and hides it from
-/// screen capture so sampling the backdrop doesn't see the widget's own text.
-fn pin_to_desktop(hwnd: windows_sys::Win32::Foundation::HWND) {
+/// Makes the widget part of the desktop. Each step is skipped when already in place,
+/// so this is cheap to repeat; winit rewrites the styles whenever it changes one.
+/// - The desktop owns it, so Win+D leaves it showing.
+/// - It is a tool window, so Alt+Tab and Task View don't list it.
+/// - It has no minimise or maximise box, so dragging it to a screen edge or pressing
+///   Win+arrow can't snap, maximise or minimise it.
+/// - It is hidden from screen capture, so sampling the backdrop doesn't see its own text.
+/// - Its frame is never painted (`quiet_frame`), so no title bar flashes up on click.
+/// - It sits below every other window; clicking it would otherwise raise it over them.
+fn tend_widget(hwnd: windows_sys::Win32::Foundation::HWND) {
     use windows_sys::Win32::UI::WindowsAndMessaging::*;
     let class: Vec<u16> = "Progman\0".encode_utf16().collect();
     // SAFETY: plain Win32 calls on a window this process owns; a null Progman is skipped.
     unsafe {
         let progman = FindWindowW(class.as_ptr(), std::ptr::null());
-        if !progman.is_null() {
+        if !progman.is_null() && GetWindow(hwnd, GW_OWNER) != progman {
             SetWindowLongPtrW(hwnd, GWLP_HWNDPARENT, progman as isize);
         }
-        SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE);
+        let style = GetWindowLongPtrW(hwnd, GWL_STYLE);
+        let wanted = style & !((WS_MINIMIZEBOX | WS_MAXIMIZEBOX) as isize);
+        if style != wanted {
+            SetWindowLongPtrW(hwnd, GWL_STYLE, wanted);
+        }
+        let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+        let wanted = ex & !(WS_EX_APPWINDOW as isize) | WS_EX_TOOLWINDOW as isize;
+        if ex != wanted {
+            SetWindowLongPtrW(hwnd, GWL_EXSTYLE, wanted);
+        }
+        windows_sys::Win32::UI::Shell::SetWindowSubclass(hwnd, Some(quiet_frame), 1, 0);
+        // Only when it changed: every call repaints the window, title bar included.
+        let mut affinity = 0;
+        if GetWindowDisplayAffinity(hwnd, &mut affinity) == 0 || affinity != WDA_EXCLUDEFROMCAPTURE {
+            SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE);
+        }
+        SetWindowPos(hwnd, HWND_BOTTOM, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    }
+}
+
+/// Screen position of the mouse in physical pixels.
+fn cursor() -> (i32, i32) {
+    let mut p = windows_sys::Win32::Foundation::POINT { x: 0, y: 0 };
+    // SAFETY: GetCursorPos writes into the POINT we pass it.
+    unsafe { windows_sys::Win32::UI::WindowsAndMessaging::GetCursorPos(&mut p) };
+    (p.x, p.y)
+}
+
+/// Stops Windows drawing a title bar over the widget when it gains or loses activation:
+/// seen on click with the region set. Suppresses the repaint; the cause was not isolated.
+unsafe extern "system" fn quiet_frame(
+    hwnd: windows_sys::Win32::Foundation::HWND,
+    msg: u32,
+    wparam: usize,
+    lparam: isize,
+    _id: usize,
+    _data: usize,
+) -> isize {
+    use windows_sys::Win32::UI::{Shell::DefSubclassProc, WindowsAndMessaging::{WM_NCACTIVATE, WM_NCPAINT}};
+    // SAFETY: forwards the window's own message to the next handler in its subclass chain.
+    unsafe {
+        match msg {
+            // 0xAE/0xAF: undocumented theme caption/frame draws. Slint re-sets the title on
+            // every resize step, and each WM_SETTEXT draws the caption through these.
+            WM_NCPAINT | 0xAE | 0xAF => 0,
+            // lparam -1 = "don't repaint the frame"; the activation change itself still happens.
+            WM_NCACTIVATE => DefSubclassProc(hwnd, msg, wparam, -1),
+            _ => DefSubclassProc(hwnd, msg, wparam, lparam),
+        }
+    }
+}
+
+/// Cuts the widget's window down to the parts with something on them: the top `ink`
+/// pixels (header and rows) and the resize grip. Clicks anywhere else in its rectangle
+/// then reach the desktop icons underneath. `[width, height, ink]` in physical pixels.
+fn shape_widget(hwnd: windows_sys::Win32::Foundation::HWND, [w, h, ink]: [i32; 3], grip: i32) {
+    use windows_sys::Win32::Graphics::Gdi::*;
+    // SAFETY: SetWindowRgn takes ownership of `shape`; the grip region is deleted here.
+    unsafe {
+        let shape = CreateRectRgn(0, 0, w, ink.min(h));
+        let corner = CreateRectRgn(w - grip, h - grip, w, h);
+        CombineRgn(shape, shape, corner, RGN_OR);
+        DeleteObject(corner);
+        if SetWindowRgn(hwnd, shape, 1) == 0 {
+            DeleteObject(shape);
+        }
+    }
+}
+
+/// Puts the widget back where it was left, if that spot is still on a connected monitor;
+/// otherwise top-right of the primary monitor.
+fn place_widget(w: &winit::window::Window, saved: Option<[i32; 4]>) {
+    if let Some([x, y, width, height]) = saved.filter(|&[x, y, ..]| on_screen(w, x + 40, y + 10)) {
+        let _ = w.request_inner_size(winit::dpi::PhysicalSize::new(width as u32, height as u32));
+        w.set_outer_position(winit::dpi::PhysicalPosition::new(x, y));
+    } else if let Some(m) = w.primary_monitor() {
+        let x = m.position().x + m.size().width as i32 - w.outer_size().width as i32 - 24;
+        w.set_outer_position(winit::dpi::PhysicalPosition::new(x, m.position().y + 24));
     }
 }
 
 /// Average brightness (0..1) of what is on screen behind the widget, or `None` when
 /// another window covers it and the reading would not be the wallpaper.
-// shortcut: only the centre point is checked for cover; check corners if half-covered widgets misjudge.
+// shortcut: only one point in the header is checked for cover; check more if half-covered widgets misjudge.
 fn backdrop_luma(hwnd: windows_sys::Win32::Foundation::HWND) -> Option<f32> {
     use windows_sys::Win32::Foundation::{POINT, RECT};
     use windows_sys::Win32::Graphics::Gdi::*;
@@ -393,7 +533,8 @@ fn backdrop_luma(hwnd: windows_sys::Win32::Foundation::HWND) -> Option<f32> {
         if GetWindowRect(hwnd, &mut r) == 0 {
             return None;
         }
-        if WindowFromPoint(POINT { x: (r.left + r.right) / 2, y: (r.top + r.bottom) / 2 }) != hwnd {
+        // The header is always part of the window's shape; the centre may be cut away.
+        if WindowFromPoint(POINT { x: (r.left + r.right) / 2, y: r.top + 12 }) != hwnd {
             return None;
         }
         let screen = GetDC(std::ptr::null_mut());
@@ -505,6 +646,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         query: RefCell::new(String::new()),
         day: Cell::new(None),
         urgencies: RefCell::new(Vec::new()),
+        shape: Cell::new([0; 3]),
     });
     app.refresh();
 
@@ -612,6 +754,43 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             a.refresh();
         });
     }
+    {
+        let a = app.clone();
+        ui.on_select_profile(move |id| {
+            a.state.borrow_mut().select_profile(id as u32);
+            a.switched();
+        });
+    }
+    ui.on_next_profile(on(|a| {
+        a.state.borrow_mut().next_profile();
+        a.switched();
+    }));
+    {
+        let a = app.clone();
+        ui.on_add_profile(move |name| {
+            a.state.borrow_mut().add_profile(&name);
+            a.switched();
+        });
+    }
+    {
+        let a = app.clone();
+        ui.on_rename_profile(move |name| {
+            a.state.borrow_mut().rename_profile(&name);
+            a.refresh();
+            a.schedule_save();
+        });
+    }
+    ui.on_delete_profile(on(|a| {
+        a.state.borrow_mut().delete_profile();
+        a.switched();
+    }));
+    {
+        let a = app.clone();
+        ui.on_send_task(move |id, profile| {
+            a.state.borrow_mut().send_to(id as u64, profile as u32);
+            a.changed();
+        });
+    }
     ui.on_undo(on(|a| a.step_history(false)));
     ui.on_redo(on(|a| a.step_history(true)));
     ui.on_show_done(on(|a| {
@@ -655,14 +834,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     {
         let w = widget.as_weak();
+        // Cursor and size when the grip was grabbed. Measured against the screen, since
+        // the pointer position in the window shifts as the window changes size.
+        let grab = Rc::new(Cell::new(((0, 0), (0, 0))));
+        let g = grab.clone();
+        let w2 = w.clone();
         widget.on_start_resize(move || {
+            if let Some(w) = w2.upgrade() {
+                let s = w.window().size();
+                g.set((cursor(), (s.width as i32, s.height as i32)));
+            }
+        });
+        widget.on_resize_drag(move || {
             if let Some(w) = w.upgrade() {
-                w.window().with_winit_window(|w| {
-                    w.drag_resize_window(winit::window::ResizeDirection::SouthEast).ok()
-                });
+                let ((x0, y0), (w0, h0)) = grab.get();
+                let (x, y) = cursor();
+                let scale = w.window().scale_factor();
+                let (min_w, min_h) = ((180.0 * scale) as i32, (90.0 * scale) as i32);
+                w.window().set_size(slint::PhysicalSize::new((w0 + x - x0).max(min_w) as u32, (h0 + y - y0).max(min_h) as u32));
             }
         });
     }
+    widget.on_reshape(on(|a| a.tend()));
     // Clicking the window's close affordances (Alt+F4) hides instead of quitting.
     {
         let a = app.clone();
@@ -707,14 +900,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let w = ui.as_weak();
     let (open_id, quit_id, widget_id) = (open_item.id().clone(), quit_item.id().clone(), widget_item.id().clone());
     let wv = widget.as_weak();
+    let wa = ui.as_weak();
     MenuEvent::set_event_handler(Some(move |e: MenuEvent| {
         if e.id == open_id {
             w.upgrade_in_event_loop(|ui| ui.invoke_show_requested()).ok();
         } else if e.id == widget_id {
-            let wv = wv.clone();
+            let (wv, wa) = (wv.clone(), wa.clone());
             slint::invoke_from_event_loop(move || {
                 if let Some(w) = wv.upgrade() {
                     if w.window().is_visible() { w.hide().ok(); } else { w.show().ok(); }
+                }
+                // Showing it makes a new native window, which has to be tended again.
+                if let Some(ui) = wa.upgrade() {
+                    ui.invoke_tend_requested();
                 }
             })
             .ok();
@@ -724,29 +922,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }));
     ui.on_toggle_requested(on(|a| a.toggle()));
     ui.on_show_requested(on(|a| a.show()));
+    ui.on_tend_requested(on(|a| {
+        a.shape.set([0; 3]);
+        a.tend();
+    }));
     ui.on_quit_requested(on(|a| {
         a.remember_widget();
         a.flush();
         slint::quit_event_loop().ok();
     }));
 
-    // The widget goes back where it was left, if that spot is still on a connected
-    // monitor; otherwise top-right of the primary monitor. Slint only creates the native
-    // window once the event loop runs, so placing and pinning wait for it.
+    // Slint only creates the native window once the event loop runs, so placing and
+    // tending wait for it.
     widget.show()?;
     let saved = app.state.borrow().widget;
     let ww = widget.as_weak();
+    let a = app.clone();
     slint::spawn_local(async move {
         let Some(widget) = ww.upgrade() else { return };
         let Ok(w) = widget.window().winit_window().await else { return };
-        if let Some([x, y, width, height]) = saved.filter(|&[x, y, ..]| on_screen(&w, x + 40, y + 10)) {
-            let _ = w.request_inner_size(winit::dpi::PhysicalSize::new(width as u32, height as u32));
-            w.set_outer_position(winit::dpi::PhysicalPosition::new(x, y));
-        } else if let Some(m) = w.primary_monitor() {
-            let x = m.position().x + m.size().width as i32 - w.outer_size().width as i32 - 24;
-            w.set_outer_position(winit::dpi::PhysicalPosition::new(x, m.position().y + 24));
-        }
-        hwnd(&w).map(pin_to_desktop);
+        place_widget(&w, saved);
+        a.tend();
     })?;
 
     // Re-check the wallpaper behind the widget now and then; it may move or the wallpaper change.
@@ -757,6 +953,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let a = app.clone();
         move || {
             a.check_clock();
+            a.tend();
             a.remember_widget();
             let Some(widget) = w.upgrade() else { return };
             if !widget.window().is_visible() {
@@ -771,6 +968,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     backdrop_timer.start(TimerMode::Repeated, Duration::from_secs(5), check_backdrop);
 
     app.show();
+    // `show` can't centre the window yet: the native window only exists once the loop runs.
+    let a = app.clone();
+    slint::spawn_local(async move {
+        if let Ok(w) = a.ui().window().winit_window().await
+            && !a.placed.replace(true)
+        {
+            center(&w);
+        }
+    })?;
     slint::run_event_loop_until_quit()?;
     app.flush();
     Ok(())

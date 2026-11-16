@@ -68,6 +68,16 @@ pub struct Task {
     /// The reminder for `due` has been shown.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub reminded: bool,
+    /// Id of the `Profile` it belongs to; files from before profiles load as 0.
+    #[serde(default)]
+    pub profile: u32,
+}
+
+/// A separate set of tasks ("Work", "School"); one is shown at a time.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct Profile {
+    pub id: u32,
+    pub name: String,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -80,6 +90,9 @@ pub struct State {
     /// Desktop widget placement in physical pixels: x, y, width, height.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub widget: Option<[i32; 4]>,
+    pub profiles: Vec<Profile>,
+    /// Id of the profile on show.
+    pub profile: u32,
 }
 
 impl Default for State {
@@ -90,6 +103,13 @@ impl Default for State {
             collapsed: BTreeMap::from([("done".to_string(), true)]),
             next_id: 1,
             widget: None,
+            // Tasks from before profiles have profile 0, so they land in Personal.
+            profiles: ["Personal", "Work", "School"]
+                .iter()
+                .zip(0..)
+                .map(|(name, id)| Profile { id, name: name.to_string() })
+                .collect(),
+            profile: 0,
         }
     }
 }
@@ -106,13 +126,95 @@ impl Task {
     }
 }
 
+/// A profile name as stored: trimmed and at most 24 characters; `None` when blank.
+fn profile_name(name: &str) -> Option<String> {
+    let name: String = name.trim().chars().take(24).collect();
+    (!name.is_empty()).then_some(name)
+}
+
 pub fn now_ms() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)
 }
 
 impl State {
+    /// The current profile's tasks in `bucket`.
     pub fn tasks_in(&self, bucket: Bucket) -> impl Iterator<Item = &Task> {
-        self.tasks.iter().filter(move |t| t.bucket == bucket)
+        self.tasks.iter().filter(move |t| t.bucket == bucket && t.profile == self.profile)
+    }
+
+    pub fn profile_name(&self, id: u32) -> &str {
+        self.profiles.iter().find(|p| p.id == id).map_or("", |p| p.name.as_str())
+    }
+
+    /// Shows another profile; unknown ids are ignored.
+    pub fn select_profile(&mut self, id: u32) {
+        if self.profiles.iter().any(|p| p.id == id) {
+            self.profile = id;
+        }
+    }
+
+    /// Shows the profile after the current one, wrapping round.
+    pub fn next_profile(&mut self) {
+        let at = self.profiles.iter().position(|p| p.id == self.profile).unwrap_or(0);
+        self.profile = self.profiles[(at + 1) % self.profiles.len()].id;
+    }
+
+    /// Adds a profile and shows it. Returns false for a blank name.
+    pub fn add_profile(&mut self, name: &str) -> bool {
+        let Some(name) = profile_name(name) else { return false };
+        let id = self.profiles.iter().map(|p| p.id + 1).max().unwrap_or(0);
+        self.profiles.push(Profile { id, name });
+        self.profile = id;
+        true
+    }
+
+    /// Renames the current profile; a blank name changes nothing.
+    pub fn rename_profile(&mut self, name: &str) {
+        let current = self.profile;
+        if let (Some(name), Some(p)) = (profile_name(name), self.profiles.iter_mut().find(|p| p.id == current)) {
+            p.name = name;
+        }
+    }
+
+    /// Deletes the current profile with all its tasks and shows the first one left.
+    /// The last profile can't be deleted.
+    pub fn delete_profile(&mut self) {
+        if self.profiles.len() < 2 {
+            return;
+        }
+        let gone = self.profile;
+        self.profiles.retain(|p| p.id != gone);
+        self.tasks.retain(|t| t.profile != gone);
+        self.profile = self.profiles[0].id;
+    }
+
+    /// Moves a task to the top of the same bucket in another profile.
+    pub fn send_to(&mut self, id: u64, profile: u32) {
+        if !self.profiles.iter().any(|p| p.id == profile) {
+            return;
+        }
+        let Some(t) = self.find_mut(id) else { return };
+        t.profile = profile;
+        let bucket = t.bucket;
+        // The same bucket, so done tasks keep their completion details.
+        self.move_to(id, bucket, 0);
+    }
+
+    /// Repairs a hand-edited file: there is always a profile, the current one exists,
+    /// and no task is left in a profile that doesn't.
+    fn heal(&mut self) {
+        if self.profiles.is_empty() {
+            self.profiles = State::default().profiles;
+        }
+        let first = self.profiles[0].id;
+        if !self.profiles.iter().any(|p| p.id == self.profile) {
+            self.profile = first;
+        }
+        for t in &mut self.tasks {
+            if !self.profiles.iter().any(|p| p.id == t.profile) {
+                t.profile = first;
+            }
+        }
     }
 
     pub fn is_collapsed(&self, bucket: Bucket) -> bool {
@@ -154,6 +256,7 @@ impl State {
                 previous_bucket: None,
                 due: None,
                 reminded: false,
+                profile: self.profile,
             },
         );
         self.move_to(id, bucket, 0);
@@ -167,21 +270,22 @@ impl State {
         self.tasks.retain(|t| t.id != id);
     }
 
-    /// Deletes every task in Done and returns how many went.
+    /// Deletes the current profile's Done tasks and returns how many went.
     pub fn clear_done(&mut self) -> usize {
         let before = self.tasks.len();
-        self.tasks.retain(|t| t.bucket != Bucket::Done);
+        self.tasks.retain(|t| t.bucket != Bucket::Done || t.profile != self.profile);
         before - self.tasks.len()
     }
 
     /// Moves a task into `bucket` so it ends up at position `index` among that
-    /// bucket's tasks. `index` counts the task itself if it is already there, which
+    /// bucket's tasks in the task's own profile. `index` counts the task itself if it is already there, which
     /// is what the UI sees while dragging. Indexes past the end append.
     pub fn move_to(&mut self, id: u64, bucket: Bucket, index: usize) {
         let Some(pos) = self.tasks.iter().position(|t| t.id == id) else { return };
         let mut index = index;
+        let profile = self.tasks[pos].profile;
         if self.tasks[pos].bucket == bucket {
-            let from = self.tasks[..pos].iter().filter(|t| t.bucket == bucket).count();
+            let from = self.tasks[..pos].iter().filter(|t| t.bucket == bucket && t.profile == profile).count();
             if from < index {
                 index -= 1;
             }
@@ -205,7 +309,7 @@ impl State {
             .tasks
             .iter()
             .enumerate()
-            .filter(|(_, t)| t.bucket == bucket)
+            .filter(|(_, t)| t.bucket == bucket && t.profile == profile)
             .map(|(i, _)| i)
             .collect();
         let at = match (slots.get(index), slots.last()) {
@@ -316,9 +420,11 @@ impl State {
         self.tasks.retain(|t| !t.text.is_empty());
     }
 
+    /// Open and done task counts for the current profile.
     pub fn counts(&self) -> (usize, usize) {
-        let done = self.tasks.iter().filter(|t| t.completed).count();
-        (self.tasks.len() - done, done)
+        let all = self.tasks.iter().filter(|t| t.profile == self.profile);
+        let done = all.clone().filter(|t| t.completed).count();
+        (all.count() - done, done)
     }
 }
 
@@ -375,7 +481,10 @@ pub fn data_path() -> PathBuf {
 pub fn load(path: &Path) -> State {
     let Ok(raw) = std::fs::read_to_string(path) else { return State::default() };
     match serde_json::from_str::<State>(&raw) {
-        Ok(state) => state,
+        Ok(mut state) => {
+            state.heal();
+            state
+        }
         Err(_) => {
             let backup = path.with_extension(format!("json.unreadable-{}", now_ms()));
             let _ = std::fs::copy(path, backup);
@@ -567,6 +676,53 @@ mod tests {
     }
 
     #[test]
+    fn profiles_keep_their_tasks_apart() {
+        let mut s = state_with(2, Bucket::Now); // Personal now: 2,1
+        assert_eq!(s.profile_name(0), "Personal");
+        assert!(!s.add_profile("  ") && s.add_profile(" Gym "));
+        let gym = s.profile;
+        assert_eq!(s.profile_name(gym), "Gym");
+        assert!(ids(&s, Bucket::Now).is_empty(), "a new profile starts empty");
+        s.add("g1", Bucket::Now);
+        s.add("g2", Bucket::Now); // Gym now: 4,3
+        // The index counts Gym's tasks only, though Personal's sit after them in the file.
+        s.move_to(4, Bucket::Now, 2);
+        assert_eq!(ids(&s, Bucket::Now), vec![3, 4]);
+        s.toggle(3);
+        assert_eq!(s.counts(), (1, 1));
+
+        s.select_profile(0);
+        s.select_profile(99);
+        assert_eq!((s.profile, ids(&s, Bucket::Now)), (0, vec![2, 1]));
+        assert_eq!(s.clear_done(), 0, "Gym's done task is not Personal's to clear");
+        s.send_to(1, gym);
+        assert_eq!(ids(&s, Bucket::Now), vec![2]);
+        s.rename_profile("Home");
+        assert_eq!(s.profile_name(0), "Home");
+
+        s.select_profile(gym);
+        assert_eq!(ids(&s, Bucket::Now), vec![1, 4]);
+        s.delete_profile();
+        assert_eq!(s.tasks.iter().map(|t| t.id).collect::<Vec<_>>(), vec![2]);
+        assert_eq!(s.profile, 0);
+        for _ in 0..3 {
+            s.delete_profile();
+        }
+        assert_eq!(s.profiles.len(), 1, "the last profile stays");
+        s.next_profile();
+        assert_eq!(s.profile, s.profiles[0].id);
+    }
+
+    #[test]
+    fn heal_rescues_tasks_from_missing_profiles() {
+        let json = r#"{"tasks": [{"id": 1, "text": "A", "bucket": "now", "profile": 7}], "profiles": [], "profile": 9}"#;
+        let mut s: State = serde_json::from_str(json).unwrap();
+        s.heal();
+        assert_eq!((s.profile, s.profiles.len()), (0, 3));
+        assert_eq!(ids(&s, Bucket::Now), vec![1]);
+    }
+
+    #[test]
     fn move_between_buckets_at_index() {
         let mut s = state_with(3, Bucket::Now); // now: 3,2,1
         s.add("s1", Bucket::Soon);
@@ -655,6 +811,9 @@ mod tests {
         assert_eq!(s.tasks[1].previous_bucket, Some(Bucket::Now));
         assert!(s.is_collapsed(Bucket::Done));
         assert_eq!(s.next_id, 6);
+        // A file from before profiles: everything is in the first profile.
+        assert_eq!((s.profile, s.profile_name(0)), (0, "Personal"));
+        assert_eq!(ids(&s, Bucket::Soon), vec![5]);
     }
 
     #[test]

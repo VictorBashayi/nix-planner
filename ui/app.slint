@@ -20,6 +20,14 @@ export struct BucketItem {
     tasks: [TaskItem],
 }
 
+export struct ProfileItem {
+    id: int,
+    name: string,
+    // Open tasks in it.
+    open: int,
+    current: bool,
+}
+
 struct MoveOption {
     key: string,
     title: string,
@@ -139,6 +147,59 @@ component Editor inherits TextInput {
     }
 }
 
+component MenuRow inherits Rectangle {
+    in property <string> label;
+    in property <string> detail;
+    in property <color> dot: transparent;
+    in property <color> ink: Palette.espresso;
+    callback clicked;
+    height: 30px;
+    border-radius: 6px;
+    background: ta.has-hover ? Palette.hover : transparent;
+    HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 10px;
+        spacing: 9px;
+        Rectangle {
+            y: (parent.height - 8px) / 2;
+            width: 8px;
+            height: 8px;
+            border-radius: 4px;
+            background: root.dot;
+        }
+
+        Text {
+            text: root.label;
+            font-size: 12.5px;
+            color: root.ink;
+            vertical-alignment: center;
+            overflow: elide;
+            horizontal-stretch: 1;
+        }
+
+        Text {
+            text: root.detail;
+            font-size: 11.5px;
+            color: Palette.faint;
+            vertical-alignment: center;
+        }
+    }
+
+    ta := TouchArea {
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+component MenuLabel inherits Text {
+    font-size: 11px;
+    color: Palette.faint;
+    height: 24px;
+    vertical-alignment: center;
+    x: 10px;
+}
+
 component TaskRow inherits Rectangle {
     in property <TaskItem> task;
     in property <string> bucket-key;
@@ -149,8 +210,11 @@ component TaskRow inherits Rectangle {
     in property <bool> drop-line;
     // Off while searching: dropping into a filtered list has no clear index.
     in property <bool> draggable: true;
+    in property <[ProfileItem]> profiles;
 
     callback toggled(int);
+    // Task id, profile id.
+    callback sent(int, int);
     callback deleted(int);
     callback moved(int, string);
     callback edit-live(int, bool, string);
@@ -240,6 +304,7 @@ component TaskRow inherits Rectangle {
         }
 
         VerticalLayout {
+            horizontal-stretch: 1;
             spacing: 2px;
             alignment: center;
 
@@ -334,6 +399,8 @@ component TaskRow inherits Rectangle {
         }
 
         HorizontalLayout {
+            // Keeps the buttons at the row's right edge, however short the title.
+            horizontal-stretch: 0;
             alignment: start;
             spacing: 0px;
             opacity: root.active && !root.lifted ? 1 : 0;
@@ -376,13 +443,8 @@ component TaskRow inherits Rectangle {
             drop-shadow-color: #2E221B26;
             VerticalLayout {
                 padding: 4px;
-                Text {
+                MenuLabel {
                     text: "Move to";
-                    font-size: 11px;
-                    color: Palette.faint;
-                    height: 24px;
-                    vertical-alignment: center;
-                    x: 10px;
                 }
                 for opt in [
                     { key: "now", title: "Today" },
@@ -390,32 +452,23 @@ component TaskRow inherits Rectangle {
                     { key: "later", title: "Someday" },
                     { key: "done", title: "Done" },
                 ]: VerticalLayout {
-                    if opt.key != root.bucket-key: Rectangle {
-                        height: 30px;
-                        border-radius: 6px;
-                        background: opt-ta.has-hover ? Palette.hover : transparent;
-                        HorizontalLayout {
-                            padding-left: 10px;
-                            spacing: 9px;
-                            alignment: start;
-                            Rectangle {
-                                y: (parent.height - 8px) / 2;
-                                width: 8px;
-                                height: 8px;
-                                border-radius: 4px;
-                                background: Palette.strength(opt.key);
-                            }
-                            Text {
-                                text: opt.title;
-                                font-size: 12.5px;
-                                color: Palette.espresso;
-                                vertical-alignment: center;
-                            }
+                    if opt.key != root.bucket-key: MenuRow {
+                        label: opt.title;
+                        dot: Palette.strength(opt.key);
+                        clicked => {
+                            root.moved(root.task.id, opt.key);
                         }
-                        opt-ta := TouchArea {
-                            clicked => {
-                                root.moved(root.task.id, opt.key);
-                            }
+                    }
+                }
+                if root.profiles.length > 1: MenuLabel {
+                    text: "Send to";
+                }
+                for p in root.profiles: VerticalLayout {
+                    if !p.current: MenuRow {
+                        label: p.name;
+                        dot: Palette.crema;
+                        clicked => {
+                            root.sent(root.task.id, p.id);
                         }
                     }
                 }
@@ -495,6 +548,20 @@ export component AppWindow inherits Window {
     in-out property <bool> offer-undo;
     in property <string> today;
     in-out property <bool> pinned: true;
+    in property <[ProfileItem]> profiles;
+    in property <string> profile-name;
+    // How many tasks the current profile holds, done ones included.
+    in property <int> profile-tasks;
+
+    callback select-profile(int);
+    callback next-profile();
+    callback add-profile(string);
+    callback rename-profile(string);
+    // Deletes the current profile and its tasks.
+    callback delete-profile();
+    callback send-task(int, int);
+    // Asks Rust to pin and shape the widget again after it was re-shown.
+    callback tend-requested();
 
     callback add-task(string);
     callback select-bucket(int);
@@ -559,6 +626,21 @@ export component AppWindow inherits Window {
         add-input.focus();
     }
 
+    // The profile name in the title bar turns into a text box: 1 names a new profile,
+    // 2 renames the current one.
+    property <int> naming;
+    // The mode picked in the profile menu. The menu hands focus back as it closes,
+    // which would end the naming at once, so the text box opens a moment later.
+    property <int> naming-next;
+    property <bool> delete-armed;
+
+    function name-profile(mode: int) {
+        name-input.text = mode == 2 ? root.profile-name : "";
+        root.naming = mode;
+        name-input.focus();
+        name-input.select-all();
+    }
+
     function set-drop(key: string, index: int) {
         root.drop-bucket = key;
         root.drop-index = index;
@@ -581,15 +663,94 @@ export component AppWindow inherits Window {
                 padding-right: 10px;
                 padding-top: 10px;
                 spacing: 2px;
-                Text {
-                    text: root.today;
+                // The profile on show; click for the others.
+                if root.naming == 0: Rectangle {
+                    horizontal-stretch: 0;
+                    HorizontalLayout {
+                        spacing: 5px;
+                        Text {
+                            text: root.profile-name;
+                            font-family: Palette.serif;
+                            font-size: 15px;
+                            color: Palette.espresso;
+                            vertical-alignment: center;
+                        }
+
+                        VerticalLayout {
+                            alignment: center;
+                            padding-top: 2px;
+                            Icon {
+                                width: 11px;
+                                height: 11px;
+                                commands: "M 3.5 6 L 8 10.5 L 12.5 6";
+                                stroke: profile-ta.has-hover ? Palette.espresso : Palette.faint;
+                            }
+                        }
+                    }
+
+                    profile-ta := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => {
+                            profile-menu.show();
+                        }
+                    }
+                }
+
+                name-input := TextInput {
+                    visible: root.naming != 0;
+                    enabled: root.naming != 0;
+                    horizontal-stretch: 0;
+                    width: root.naming != 0 ? 130px : 0px;
+                    vertical-alignment: center;
                     font-family: Palette.serif;
                     font-size: 15px;
                     color: Palette.espresso;
-                    vertical-alignment: center;
+                    selection-background-color: Palette.crema;
+                    selection-foreground-color: Palette.espresso;
+                    accepted => {
+                        if (root.naming == 1) {
+                            root.add-profile(self.text);
+                        } else if (root.naming == 2) {
+                            root.rename-profile(self.text);
+                        }
+                        root.naming = 0;
+                        root.focus-input();
+                    }
+                    key-pressed(event) => {
+                        if (event.text == Key.Escape) {
+                            root.naming = 0;
+                            root.focus-input();
+                            return accept;
+                        }
+                        reject
+                    }
+                    changed has-focus => {
+                        if (!self.has-focus) {
+                            root.naming = 0;
+                        }
+                    }
+                    if self.text == "" && root.naming != 0: Text {
+                        height: parent.height;
+                        text: "Profile name";
+                        font-family: Palette.serif;
+                        font-size: 15px;
+                        color: Palette.faint;
+                        vertical-alignment: center;
+                    }
                 }
 
-                Rectangle { }
+                Rectangle {
+                    width: 8px;
+                }
+
+                Text {
+                    horizontal-stretch: 1;
+                    text: root.today;
+                    font-size: 11.5px;
+                    color: Palette.muted;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
 
                 VerticalLayout {
                     alignment: center;
@@ -681,6 +842,10 @@ export component AppWindow inherits Window {
                             root.open-search();
                             return accept;
                         }
+                        if (event.modifiers.control && event.text == Key.Tab) {
+                            root.next-profile();
+                            return accept;
+                        }
                         if (event.modifiers.control && event.text == "1") {
                             root.select-bucket(0);
                             return accept;
@@ -765,6 +930,9 @@ export component AppWindow inherits Window {
         // Buckets
         list := Flickable {
             content-height: column.preferred-height;
+            // Without this the list's own height caps the window's, and a short list
+            // (an empty profile) shrinks the window to fit.
+            max-height: 100000px;
             column := VerticalLayout {
                 width: list.width;
                 padding-left: 10px;
@@ -874,6 +1042,10 @@ export component AppWindow inherits Window {
                             drag-y: root.drag-y;
                             lifted: root.drag-id == task.id;
                             draggable: !root.filtering;
+                            profiles: root.profiles;
+                            sent(id, profile) => {
+                                root.send-task(id, profile);
+                            }
                             drop-line: root.dragging && root.drop-bucket == bucket.key && root.drop-index == i;
                             toggled(id) => {
                                 root.toggle-task(id);
@@ -979,14 +1151,29 @@ export component AppWindow inherits Window {
 
                 Rectangle { }
 
-                if !root.offer-undo: Text {
+                // Second click of deleting a profile; the first was in the profile menu.
+                if root.delete-armed: Text {
+                    text: "Delete " + root.profile-name + (root.profile-tasks == 0 ? "?" : root.profile-tasks == 1 ? " and its task?" : " and its " + root.profile-tasks + " tasks?");
+                    font-size: 11.5px;
+                    color: delete-ta.has-hover ? Palette.espresso : Palette.danger;
+                    vertical-alignment: center;
+                    delete-ta := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => {
+                            root.delete-armed = false;
+                            root.delete-profile();
+                        }
+                    }
+                }
+
+                if !root.offer-undo && !root.delete-armed: Text {
                     text: "Alt+P shows and hides";
                     font-size: 11.5px;
                     color: Palette.faint;
                     vertical-alignment: center;
                 }
 
-                if root.offer-undo: Text {
+                if root.offer-undo && !root.delete-armed: Text {
                     text: "Undo";
                     font-size: 11.5px;
                     color: undo-ta.has-hover ? Palette.espresso : Palette.coffee;
@@ -1030,6 +1217,85 @@ export component AppWindow inherits Window {
         running: root.offer-undo;
         triggered => {
             root.offer-undo = false;
+        }
+    }
+
+    Timer {
+        interval: 5s;
+        running: root.delete-armed;
+        triggered => {
+            root.delete-armed = false;
+        }
+    }
+
+    Timer {
+        interval: 30ms;
+        running: root.naming-next != 0;
+        triggered => {
+            root.name-profile(root.naming-next);
+            root.naming-next = 0;
+        }
+    }
+
+    profile-menu := PopupWindow {
+        x: 12px;
+        y: 42px;
+        width: 190px;
+        Rectangle {
+            background: Palette.surface;
+            border-radius: 10px;
+            border-width: 1px;
+            border-color: Palette.hairline;
+            drop-shadow-blur: 18px;
+            drop-shadow-offset-y: 6px;
+            drop-shadow-color: #2E221B26;
+            VerticalLayout {
+                padding: 4px;
+                MenuLabel {
+                    text: "Profiles";
+                }
+                for p in root.profiles: MenuRow {
+                    label: p.name;
+                    detail: p.open > 0 ? p.open : "";
+                    dot: p.current ? Palette.coffee : Palette.crema;
+                    clicked => {
+                        root.delete-armed = false;
+                        root.select-profile(p.id);
+                    }
+                }
+                Rectangle {
+                    height: 9px;
+                    Rectangle {
+                        x: 8px;
+                        y: 4px;
+                        width: parent.width - 16px;
+                        height: 1px;
+                        background: Palette.hairline;
+                    }
+                }
+
+                MenuRow {
+                    label: "New profile";
+                    clicked => {
+                        root.naming-next = 1;
+                    }
+                }
+
+                MenuRow {
+                    label: "Rename " + root.profile-name;
+                    clicked => {
+                        root.naming-next = 2;
+                    }
+                }
+
+                if root.profiles.length > 1: MenuRow {
+                    label: "Delete " + root.profile-name;
+                    ink: Palette.danger;
+                    clicked => {
+                        root.delete-armed = true;
+                    }
+                }
+            }
         }
     }
 
@@ -1128,6 +1394,10 @@ component InkText inherits Text {
 export component WidgetWindow inherits Window {
     title: "Quick Planner widget";
     no-frame: true;
+    // Slint turns a press near an edge into Windows' own resize, which draws an outline
+    // box over the widget; the grip does the resizing instead. Negative, not zero: the
+    // cursor outruns the window while the grip grows it, and 0 counts that as "on the edge".
+    resize-border-width: -100px;
     background: transparent;
     default-font-family: "Segoe UI Variable Text";
     default-font-size: 13px;
@@ -1141,11 +1411,30 @@ export component WidgetWindow inherits Window {
     in property <string> today;
     // Set from Rust after sampling the wallpaper behind the widget.
     in property <bool> dark-bg;
+    // The profile on show, or "" when there is only one.
+    in property <string> profile;
 
     callback toggle-task(int);
     callback open-app();
     callback start-move();
+    // Resized by the grip itself: Windows' own resize loop draws an outline box over the
+    // widget's see-through window.
     callback start-resize();
+    callback resize-drag();
+
+    // How far down the header and rows reach. Rust cuts the window to this (plus the
+    // grip), so clicks below it land on the desktop; `reshape` says it needs redoing.
+    out property <length> ink-height: 14px + 22px + 9px + max(1, rows.shown + (rows.shown < root.tasks.length ? 1 : 0)) * rows.row-h;
+    callback reshape();
+    changed ink-height => {
+        root.reshape();
+    }
+    changed width => {
+        root.reshape();
+    }
+    changed height => {
+        root.reshape();
+    }
 
     // Resize grip, larger than the main window's so it is easy to catch.
     Rectangle {
@@ -1168,6 +1457,11 @@ export component WidgetWindow inherits Window {
                     root.start-resize();
                 }
             }
+            moved => {
+                if (self.pressed) {
+                    root.resize-drag();
+                }
+            }
         }
     }
 
@@ -1187,7 +1481,7 @@ export component WidgetWindow inherits Window {
                 }
 
                 InkText {
-                    text: root.today;
+                    text: root.profile == "" ? root.today : root.profile + " · " + root.today;
                     font-size: 11px;
                     dark-bg: root.dark-bg;
                     horizontal-stretch: 1;
