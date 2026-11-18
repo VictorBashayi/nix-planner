@@ -473,7 +473,7 @@ impl History {
 
 pub fn data_path() -> PathBuf {
     let base = std::env::var_os("APPDATA").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
-    base.join("quick-planner").join("planner-tasks.json")
+    base.join("nix-planner").join("planner-tasks.json")
 }
 
 /// Loads the state. A file that exists but can't be parsed is copied aside

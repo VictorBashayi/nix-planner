@@ -3,7 +3,7 @@
 use std::path::Path;
 use tauri_winrt_notification::Toast;
 
-const APP_ID: &str = "QuickPlanner";
+const APP_ID: &str = "NixPlanner";
 
 /// What the user clicked on a toast.
 pub enum Click {
@@ -19,7 +19,7 @@ pub fn register(dir: &Path) {
     if let Err(err) = write_icon(&icon) {
         eprintln!("could not write notification icon: {err}");
     }
-    set_value("DisplayName", "Quick Planner");
+    set_value("DisplayName", "Nix Planner");
     set_value("IconUri", &icon.to_string_lossy());
 }
 

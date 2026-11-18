@@ -602,7 +602,7 @@ fn center(w: &winit::window::Window) {
 fn single_instance() -> Option<isize> {
     use windows_sys::Win32::Foundation::{ERROR_ALREADY_EXISTS, GetLastError};
     use windows_sys::Win32::System::Threading::CreateMutexW;
-    let name: Vec<u16> = "Local\\QuickPlannerSingleInstance\0".encode_utf16().collect();
+    let name: Vec<u16> = "Local\\NixPlannerSingleInstance\0".encode_utf16().collect();
     // SAFETY: valid NUL-terminated name, default security attributes.
     let handle = unsafe { CreateMutexW(std::ptr::null(), 0, name.as_ptr()) };
     let exists = unsafe { GetLastError() } == ERROR_ALREADY_EXISTS;
@@ -866,14 +866,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Tray icon and menu.
-    let open_item = MenuItem::new("Open Quick Planner", true, None);
+    let open_item = MenuItem::new("Open Nix Planner", true, None);
     let widget_item = MenuItem::new("Show or hide widget", true, None);
     let quit_item = MenuItem::new("Quit", true, None);
     let menu = Menu::new();
     menu.append_items(&[&open_item, &widget_item, &PredefinedMenuItem::separator(), &quit_item])?;
     let _tray = TrayIconBuilder::new()
         .with_icon(tray_icon::Icon::from_rgba(icon::rgba(), icon::SIZE, icon::SIZE)?)
-        .with_tooltip("Quick Planner (Alt+P)")
+        .with_tooltip("Nix Planner (Alt+P)")
         .with_menu(Box::new(menu))
         .with_menu_on_left_click(false)
         .build()?;

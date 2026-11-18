@@ -82,7 +82,7 @@ style as the Move menu:
   always running in the tray.
 - **Plumbing:** the `tauri-winrt-notification` crate. Unpackaged apps need an
   AppUserModelID: on startup the app writes
-  `HKCU\Software\Classes\AppUserModelId\QuickPlanner` (DisplayName, IconUri pointing to an
+  `HKCU\Software\Classes\AppUserModelId\NixPlanner` (DisplayName, IconUri pointing to an
   icon PNG saved next to the tasks file) and calls `SetCurrentProcessExplicitAppUserModelID`.
   No installer and no admin rights are needed. This goes in a new `src/notify.rs`.
 

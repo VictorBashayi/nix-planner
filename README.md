@@ -1,4 +1,4 @@
-# Quick Planner
+# Nix Planner
 
 A small, calm task planner for Windows. It is one native `.exe` (Rust + Slint, software
 rendering), so it needs no browser engine or Node runtime. It idles at about 0% CPU and
@@ -31,7 +31,7 @@ A transparent card on the desktop shows today's open tasks for the profile on sh
 
 ## Data
 
-Tasks are saved to `%APPDATA%\quick-planner\planner-tasks.json`. Writes are debounced and
+Tasks are saved to `%APPDATA%\nix-planner\planner-tasks.json`. Writes are debounced and
 atomic, and an unreadable file is backed up rather than overwritten.
 
 ## Building
@@ -43,7 +43,7 @@ find `as` without it.
 ```sh
 cargo test
 cargo run                # debug build
-cargo build --release    # target/release/quick-planner.exe
+cargo build --release    # target/release/nix-planner.exe
 ```
 
 Only one copy runs at a time, so quit the installed app before running a dev build.
@@ -60,4 +60,4 @@ Built with [Slint](https://slint.dev), used under the Slint Royalty-free Desktop
 
 ## Licence
 
-Quick Planner's own code is under the [MIT License](LICENSE). The font and Slint keep their own licences, as noted above.
+Nix Planner's own code is under the [MIT License](LICENSE). The font and Slint keep their own licences, as noted above.
