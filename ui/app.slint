@@ -1,532 +1,6 @@
-import "fonts/YoungSerif-Regular.ttf";
-
-export struct TaskItem {
-    id: int,
-    title: string,
-    desc: string,
-    done: bool,
-    // "Completed today" for done tasks, "Due Sat 7 Nov" for open ones with a due date.
-    when: string,
-    overdue: bool,
-    // Within the hour before its due time.
-    soon: bool,
-}
-
-export struct BucketItem {
-    key: string,
-    title: string,
-    collapsed: bool,
-    empty-text: string,
-    tasks: [TaskItem],
-}
-
-export struct ProfileItem {
-    id: int,
-    name: string,
-    // Open tasks in it.
-    open: int,
-    current: bool,
-}
-
-struct MoveOption {
-    key: string,
-    title: string,
-}
-
-global Palette {
-    out property <color> porcelain: #FAF9F7;
-    out property <color> surface: #FFFFFF;
-    out property <color> espresso: #2E221B;
-    out property <color> coffee: #B0703A;
-    out property <color> crema: #EADBC8;
-    out property <color> foam: #F4EBE0;
-    out property <color> muted: #8C8079;
-    out property <color> faint: #B5ACA5;
-    out property <color> hairline: #ECE6DF;
-    out property <color> hover: #F3EEE8;
-    out property <color> danger: #B4442F;
-    out property <string> serif: "Young Serif";
-
-    // Coffee gets weaker the further away a bucket is in time.
-    public pure function strength(key: string) -> color {
-        if (key == "now") {
-            return #96532A;
-        }
-        if (key == "soon") {
-            return #B0703A;
-        }
-        if (key == "later") {
-            return #C49A74;
-        }
-        return #A79F98;
-    }
-}
-
-component Icon inherits Path {
-    width: 16px;
-    height: 16px;
-    viewbox-width: 16;
-    viewbox-height: 16;
-    fill: transparent;
-    stroke-width: 1.5px;
-    stroke-line-cap: round;
-}
-
-component IconButton inherits Rectangle {
-    in property <string> icon;
-    in property <bool> active;
-    in property <color> hover-tint: Palette.espresso;
-    out property <bool> hovered: ta.has-hover;
-    callback clicked;
-    width: 28px;
-    height: 28px;
-    border-radius: 7px;
-    background: ta.has-hover ? Palette.hover : transparent;
-    Icon {
-        commands: root.icon;
-        stroke: root.active ? Palette.coffee : ta.has-hover ? root.hover-tint : Palette.muted;
-    }
-
-    ta := TouchArea {
-        mouse-cursor: pointer;
-        clicked => {
-            root.clicked();
-        }
-    }
-}
-
-component Check inherits Rectangle {
-    in property <bool> done;
-    in property <color> tint;
-    callback toggled;
-    width: 18px;
-    height: 18px;
-    border-radius: 9px;
-    border-width: 1.5px;
-    border-color: root.done ? Palette.coffee : ta.has-hover ? Palette.coffee : root.tint;
-    background: root.done ? Palette.coffee : ta.has-hover ? Palette.foam : transparent;
-    if root.done || ta.has-hover: Icon {
-        width: 10px;
-        height: 10px;
-        commands: "M 3.5 8.5 L 6.5 11.5 L 12.5 4.5";
-        stroke: root.done ? Palette.surface : Palette.coffee;
-        stroke-width: 2px;
-    }
-    ta := TouchArea {
-        mouse-cursor: pointer;
-        clicked => {
-            root.toggled();
-        }
-    }
-}
-
-component Editor inherits TextInput {
-    callback finished;
-    callback cancelled;
-    callback enter-pressed;
-    single-line: false;
-    wrap: word-wrap;
-    color: Palette.espresso;
-    selection-background-color: Palette.crema;
-    selection-foreground-color: Palette.espresso;
-    key-pressed(event) => {
-        if (event.text == Key.Escape) {
-            root.cancelled();
-            return accept;
-        }
-        if (event.text == Key.Return && !event.modifiers.shift) {
-            root.enter-pressed();
-            return accept;
-        }
-        reject
-    }
-    changed has-focus => {
-        if (!self.has-focus) {
-            root.finished();
-        }
-    }
-}
-
-component MenuRow inherits Rectangle {
-    in property <string> label;
-    in property <string> detail;
-    in property <color> dot: transparent;
-    in property <color> ink: Palette.espresso;
-    callback clicked;
-    height: 30px;
-    border-radius: 6px;
-    background: ta.has-hover ? Palette.hover : transparent;
-    HorizontalLayout {
-        padding-left: 10px;
-        padding-right: 10px;
-        spacing: 9px;
-        Rectangle {
-            y: (parent.height - 8px) / 2;
-            width: 8px;
-            height: 8px;
-            border-radius: 4px;
-            background: root.dot;
-        }
-
-        Text {
-            text: root.label;
-            font-size: 12.5px;
-            color: root.ink;
-            vertical-alignment: center;
-            overflow: elide;
-            horizontal-stretch: 1;
-        }
-
-        Text {
-            text: root.detail;
-            font-size: 11.5px;
-            color: Palette.faint;
-            vertical-alignment: center;
-        }
-    }
-
-    ta := TouchArea {
-        clicked => {
-            root.clicked();
-        }
-    }
-}
-
-component MenuLabel inherits Text {
-    font-size: 11px;
-    color: Palette.faint;
-    height: 24px;
-    vertical-alignment: center;
-    x: 10px;
-}
-
-component TaskRow inherits Rectangle {
-    in property <TaskItem> task;
-    in property <string> bucket-key;
-    in property <int> index;
-    in property <bool> drag-active;
-    in property <length> drag-y;
-    in property <bool> lifted;
-    in property <bool> drop-line;
-    // Off while searching: dropping into a filtered list has no clear index.
-    in property <bool> draggable: true;
-    in property <[ProfileItem]> profiles;
-
-    callback toggled(int);
-    // Task id, profile id.
-    callback sent(int, int);
-    callback deleted(int);
-    callback moved(int, string);
-    callback edit-live(int, bool, string);
-    callback edit-finished();
-    callback edit-cancelled(int, string, string);
-    callback drag-start(int, string, length, length, length);
-    callback drag-move(length, length);
-    callback drag-end();
-    callback drag-cancelled();
-    callback hover-drop(int);
-
-    property <bool> editing-title;
-    property <bool> editing-desc;
-    property <bool> editing: editing-title || editing-desc;
-    property <bool> drag-started;
-    property <bool> active: row-ta.has-hover || move-btn.hovered || del-btn.hovered || editing;
-    property <length> top: self.absolute-position.y;
-    property <int> zone: !root.drag-active ? 0
-        : root.drag-y >= root.top && root.drag-y < root.top + root.height / 2 ? 1
-        : root.drag-y >= root.top + root.height / 2 && root.drag-y < root.top + root.height ? 2 : 0;
-    changed zone => {
-        if (root.zone == 1) {
-            root.hover-drop(root.index);
-        } else if (root.zone == 2) {
-            root.hover-drop(root.index + 1);
-        }
-    }
-
-    border-radius: 8px;
-    background: root.active && !root.lifted ? Palette.hover : transparent;
-    opacity: root.lifted ? 0.35 : 1;
-
-    row-ta := TouchArea {
-        mouse-cursor: root.drag-started ? grabbing : default;
-        moved => {
-            if (self.pressed && root.draggable && !root.drag-started && !root.editing
-                    && abs(self.mouse-x - self.pressed-x) + abs(self.mouse-y - self.pressed-y) > 5px) {
-                root.drag-started = true;
-                root.drag-start(root.task.id, root.task.title, self.pressed-x, self.pressed-y, root.width);
-            }
-            if (root.drag-started) {
-                root.drag-move(self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
-            }
-        }
-        pointer-event(event) => {
-            if (event.kind == PointerEventKind.up && root.drag-started) {
-                root.drag-started = false;
-                root.drag-end();
-            }
-            // The list's Flickable steals quick flicks mid-drag; we then get cancel, never up.
-            if (event.kind == PointerEventKind.cancel && root.drag-started) {
-                root.drag-started = false;
-                root.drag-cancelled();
-            }
-        }
-        clicked => {
-            if (root.drag-started || root.editing) {
-                return;
-            }
-            if (self.mouse-y > 8px + title-slot.y + title-slot.height && root.task.desc != "") {
-                root.editing-desc = true;
-                desc-editor.focus();
-            } else {
-                root.editing-title = true;
-                title-editor.focus();
-            }
-        }
-    }
-
-    HorizontalLayout {
-        padding-left: 10px;
-        padding-right: 6px;
-        padding-top: 8px;
-        padding-bottom: 8px;
-        spacing: 10px;
-
-        VerticalLayout {
-            alignment: start;
-            padding-top: 1px;
-            Check {
-                done: root.task.done;
-                tint: Palette.strength(root.bucket-key);
-                toggled => {
-                    root.toggled(root.task.id);
-                }
-            }
-        }
-
-        VerticalLayout {
-            horizontal-stretch: 1;
-            spacing: 2px;
-            alignment: center;
-
-            title-slot := Rectangle {
-                min-height: 20px;
-                if !root.editing-title: Text {
-                    width: 100%;
-                    text: root.task.title;
-                    // Single line keeps row heights exact; wrapped text throws off the list's scroll height.
-                    overflow: elide;
-                    font-size: 13.5px;
-                    color: root.task.done ? Palette.muted : Palette.espresso;
-                    vertical-alignment: center;
-                }
-                title-editor := Editor {
-                    visible: root.editing-title;
-                    enabled: root.editing-title;
-                    width: 100%;
-                    text: root.task.title;
-                    font-size: 13.5px;
-                    edited => {
-                        root.edit-live(root.task.id, false, self.text);
-                    }
-                    enter-pressed => {
-                        if (root.task.desc == "") {
-                            root.editing-desc = true;
-                            desc-editor.focus();
-                            root.editing-title = false;
-                        } else {
-                            root.editing-title = false;
-                            root.edit-finished();
-                        }
-                    }
-                    cancelled => {
-                        root.editing-title = false;
-                        root.edit-cancelled(root.task.id, root.task.title, root.task.desc);
-                    }
-                    finished => {
-                        if (root.editing-title) {
-                            root.editing-title = false;
-                            if (!root.editing-desc) {
-                                root.edit-finished();
-                            }
-                        }
-                    }
-                }
-            }
-
-            if root.task.desc != "" && !root.editing-desc: Text {
-                text: root.task.desc;
-                overflow: elide;
-                font-size: 12px;
-                color: Palette.muted;
-            }
-            desc-editor := Editor {
-                visible: root.editing-desc;
-                enabled: root.editing-desc;
-                height: root.editing-desc ? self.preferred-height : 0px;
-                text: root.task.desc;
-                font-size: 12px;
-                color: Palette.muted;
-                edited => {
-                    root.edit-live(root.task.id, true, self.text);
-                }
-                enter-pressed => {
-                    root.editing-desc = false;
-                    root.edit-finished();
-                }
-                cancelled => {
-                    root.editing-desc = false;
-                    root.edit-cancelled(root.task.id, root.task.title, root.task.desc);
-                }
-                finished => {
-                    if (root.editing-desc) {
-                        root.editing-desc = false;
-                        root.edit-finished();
-                    }
-                }
-                if self.text == "" && root.editing-desc: Text {
-                    text: "Add a note";
-                    font-size: 12px;
-                    color: Palette.faint;
-                }
-            }
-
-            if root.task.when != "": Text {
-                text: root.task.when;
-                overflow: elide;
-                font-size: 11px;
-                color: root.task.overdue ? Palette.danger : root.task.soon ? Palette.coffee : Palette.faint;
-            }
-        }
-
-        HorizontalLayout {
-            // Keeps the buttons at the row's right edge, however short the title.
-            horizontal-stretch: 0;
-            alignment: start;
-            spacing: 0px;
-            opacity: root.active && !root.lifted ? 1 : 0;
-            move-btn := IconButton {
-                icon: "M 3.5 8 L 3.6 8 M 8 8 L 8.1 8 M 12.5 8 L 12.6 8";
-                clicked => {
-                    menu.show();
-                }
-            }
-            del-btn := IconButton {
-                icon: "M 4.5 4.5 L 11.5 11.5 M 11.5 4.5 L 4.5 11.5";
-                hover-tint: Palette.danger;
-                clicked => {
-                    root.deleted(root.task.id);
-                }
-            }
-        }
-    }
-
-    if root.drop-line: Rectangle {
-        x: 8px;
-        y: -1px;
-        width: parent.width - 16px;
-        height: 2px;
-        border-radius: 1px;
-        background: Palette.coffee;
-    }
-
-    menu := PopupWindow {
-        x: root.width - 150px;
-        y: 36px;
-        width: 140px;
-        Rectangle {
-            background: Palette.surface;
-            border-radius: 10px;
-            border-width: 1px;
-            border-color: Palette.hairline;
-            drop-shadow-blur: 18px;
-            drop-shadow-offset-y: 6px;
-            drop-shadow-color: #2E221B26;
-            VerticalLayout {
-                padding: 4px;
-                MenuLabel {
-                    text: "Move to";
-                }
-                for opt in [
-                    { key: "now", title: "Today" },
-                    { key: "soon", title: "This week" },
-                    { key: "later", title: "Someday" },
-                    { key: "done", title: "Done" },
-                ]: VerticalLayout {
-                    if opt.key != root.bucket-key: MenuRow {
-                        label: opt.title;
-                        dot: Palette.strength(opt.key);
-                        clicked => {
-                            root.moved(root.task.id, opt.key);
-                        }
-                    }
-                }
-                if root.profiles.length > 1: MenuLabel {
-                    text: "Send to";
-                }
-                for p in root.profiles: VerticalLayout {
-                    if !p.current: MenuRow {
-                        label: p.name;
-                        dot: Palette.crema;
-                        clicked => {
-                            root.sent(root.task.id, p.id);
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-// A strip of a bucket that accepts drops at a fixed index.
-component DropZone inherits Rectangle {
-    in property <bool> drag-active;
-    in property <length> drag-y;
-    in property <int> drop-index;
-    callback hover-drop(int);
-    property <bool> over: root.drag-active && root.drag-y >= self.absolute-position.y
-        && root.drag-y < self.absolute-position.y + self.height;
-    changed over => {
-        if (root.over) {
-            root.hover-drop(root.drop-index);
-        }
-    }
-}
-
-component Chip inherits Rectangle {
-    in property <string> label;
-    in property <string> key;
-    in property <bool> selected;
-    callback clicked;
-    height: 26px;
-    border-radius: 13px;
-    background: root.selected ? Palette.foam : ta.has-hover ? Palette.hover : transparent;
-    HorizontalLayout {
-        padding-left: 10px;
-        padding-right: 11px;
-        spacing: 7px;
-        Rectangle {
-            y: (parent.height - 7px) / 2;
-            width: 7px;
-            height: 7px;
-            border-radius: 3.5px;
-            background: Palette.strength(root.key);
-            opacity: root.selected ? 1 : 0.55;
-        }
-        Text {
-            text: root.label;
-            font-size: 12px;
-            vertical-alignment: center;
-            color: root.selected ? Palette.espresso : Palette.muted;
-        }
-    }
-
-    ta := TouchArea {
-        mouse-cursor: pointer;
-        clicked => {
-            root.clicked();
-        }
-    }
-}
+import { Theme, TaskItem, BucketItem, ProfileItem, MoveOption, Icon, IconButton, Check, MenuRow, MenuLabel, DropZone, Chip } from "theme.slint";
+import { TaskRow, Editor } from "task_row.slint";
+export { Theme, TaskItem, BucketItem, ProfileItem }
 
 export component AppWindow inherits Window {
     title: "Nix Planner";
@@ -536,7 +10,7 @@ export component AppWindow inherits Window {
     preferred-height: 640px;
     min-width: 320px;
     min-height: 360px;
-    background: Palette.porcelain;
+    background: Theme.canvas;
     default-font-family: "Segoe UI Variable Text";
     default-font-size: 13px;
 
@@ -670,9 +144,9 @@ export component AppWindow inherits Window {
                         spacing: 5px;
                         Text {
                             text: root.profile-name;
-                            font-family: Palette.serif;
+                            font-family: Theme.serif;
                             font-size: 15px;
-                            color: Palette.espresso;
+                            color: Theme.text;
                             vertical-alignment: center;
                         }
 
@@ -683,7 +157,7 @@ export component AppWindow inherits Window {
                                 width: 11px;
                                 height: 11px;
                                 commands: "M 3.5 6 L 8 10.5 L 12.5 6";
-                                stroke: profile-ta.has-hover ? Palette.espresso : Palette.faint;
+                                stroke: profile-ta.has-hover ? Theme.text : Theme.text-muted;
                             }
                         }
                     }
@@ -702,11 +176,11 @@ export component AppWindow inherits Window {
                     horizontal-stretch: 0;
                     width: root.naming != 0 ? 130px : 0px;
                     vertical-alignment: center;
-                    font-family: Palette.serif;
+                    font-family: Theme.serif;
                     font-size: 15px;
-                    color: Palette.espresso;
-                    selection-background-color: Palette.crema;
-                    selection-foreground-color: Palette.espresso;
+                    color: Theme.text;
+                    selection-background-color: Theme.accent-soft;
+                    selection-foreground-color: Theme.text;
                     accepted => {
                         if (root.naming == 1) {
                             root.add-profile(self.text);
@@ -732,9 +206,9 @@ export component AppWindow inherits Window {
                     if self.text == "" && root.naming != 0: Text {
                         height: parent.height;
                         text: "Profile name";
-                        font-family: Palette.serif;
+                        font-family: Theme.serif;
                         font-size: 15px;
-                        color: Palette.faint;
+                        color: Theme.text-muted;
                         vertical-alignment: center;
                     }
                 }
@@ -747,7 +221,7 @@ export component AppWindow inherits Window {
                     horizontal-stretch: 1;
                     text: root.today;
                     font-size: 11.5px;
-                    color: Palette.muted;
+                    color: Theme.text-muted;
                     vertical-alignment: center;
                     overflow: elide;
                 }
@@ -801,9 +275,9 @@ export component AppWindow inherits Window {
             Rectangle {
                 height: 42px;
                 border-radius: 10px;
-                background: Palette.surface;
+                background: Theme.card;
                 border-width: 1px;
-                border-color: add-input.has-focus || search-input.has-focus ? Palette.coffee : Palette.hairline;
+                border-color: add-input.has-focus || search-input.has-focus ? Theme.accent : Theme.hairline;
 
                 add-input := TextInput {
                     visible: !root.searching;
@@ -813,9 +287,9 @@ export component AppWindow inherits Window {
                     height: parent.height;
                     vertical-alignment: center;
                     font-size: 14px;
-                    color: Palette.espresso;
-                    selection-background-color: Palette.crema;
-                    selection-foreground-color: Palette.espresso;
+                    color: Theme.text;
+                    selection-background-color: Theme.accent-soft;
+                    selection-foreground-color: Theme.text;
                     accepted => {
                         if (self.text != "") {
                             root.add-task(self.text);
@@ -870,9 +344,9 @@ export component AppWindow inherits Window {
                     height: parent.height;
                     vertical-alignment: center;
                     font-size: 14px;
-                    color: Palette.espresso;
-                    selection-background-color: Palette.crema;
-                    selection-foreground-color: Palette.espresso;
+                    color: Theme.text;
+                    selection-background-color: Theme.accent-soft;
+                    selection-foreground-color: Theme.text;
                     edited => {
                         root.search(self.text);
                     }
@@ -891,7 +365,7 @@ export component AppWindow inherits Window {
                     vertical-alignment: center;
                     text: root.searching ? "Search tasks" : "Add a task";
                     font-size: 14px;
-                    color: Palette.faint;
+                    color: Theme.text-muted;
                 }
             }
 
@@ -919,7 +393,7 @@ export component AppWindow inherits Window {
                     horizontal-stretch: 1;
                     text: root.searching ? "" : root.due-preview(add-input.text);
                     font-size: 11.5px;
-                    color: Palette.coffee;
+                    color: Theme.accent;
                     horizontal-alignment: right;
                     vertical-alignment: center;
                     overflow: elide;
@@ -946,7 +420,7 @@ export component AppWindow inherits Window {
                         vertical-alignment: center;
                         text: "No tasks match.";
                         font-size: 12.5px;
-                        color: Palette.faint;
+                        color: Theme.text-muted;
                     }
                 }
 
@@ -978,9 +452,9 @@ export component AppWindow inherits Window {
                             spacing: 8px;
                             Text {
                                 text: bucket.title;
-                                font-family: Palette.serif;
+                                font-family: Theme.serif;
                                 font-size: 19px;
-                                color: Palette.strength(bucket.key);
+                                color: Theme.strength(bucket.key);
                                 vertical-alignment: center;
                             }
 
@@ -991,7 +465,7 @@ export component AppWindow inherits Window {
                             if bucket.key == "done" && bucket.tasks.length > 0 && !root.filtering: Text {
                                 text: root.clear-armed ? "Clear " + bucket.tasks.length + "?" : "Clear";
                                 font-size: 12px;
-                                color: root.clear-armed ? Palette.coffee : clear-ta.has-hover ? Palette.espresso : Palette.faint;
+                                color: root.clear-armed ? Theme.accent : clear-ta.has-hover ? Theme.text : Theme.text-muted;
                                 vertical-alignment: center;
                                 clear-ta := TouchArea {
                                     mouse-cursor: pointer;
@@ -1009,7 +483,7 @@ export component AppWindow inherits Window {
                             Text {
                                 text: bucket.tasks.length;
                                 font-size: 12px;
-                                color: Palette.faint;
+                                color: Theme.text-muted;
                                 vertical-alignment: center;
                             }
 
@@ -1019,7 +493,7 @@ export component AppWindow inherits Window {
                                     width: 12px;
                                     height: 12px;
                                     commands: bucket.collapsed ? "M 6 3.5 L 10.5 8 L 6 12.5" : "M 3.5 6 L 8 10.5 L 12.5 6";
-                                    stroke: header-ta.has-hover ? Palette.espresso : Palette.faint;
+                                    stroke: header-ta.has-hover ? Theme.text : Theme.text-muted;
                                 }
                             }
                         }
@@ -1029,7 +503,7 @@ export component AppWindow inherits Window {
                             y: parent.height - 3px;
                             width: parent.width - 36px;
                             height: 2px;
-                            background: Palette.coffee;
+                            background: Theme.accent;
                         }
                     }
 
@@ -1105,7 +579,7 @@ export component AppWindow inherits Window {
                                 y: 4px;
                                 text: bucket.empty-text;
                                 font-size: 12.5px;
-                                color: Palette.faint;
+                                color: Theme.text-muted;
                             }
                             if root.dragging && root.drop-bucket == bucket.key && root.drop-index == bucket.tasks.length
                                 && bucket.tasks.length > 0: Rectangle {
@@ -1113,7 +587,7 @@ export component AppWindow inherits Window {
                                 y: 0px;
                                 width: parent.width - 16px;
                                 height: 2px;
-                                background: Palette.coffee;
+                                background: Theme.accent;
                             }
                         }
                     }
@@ -1127,7 +601,7 @@ export component AppWindow inherits Window {
             Rectangle {
                 y: 0;
                 height: 1px;
-                background: Palette.hairline;
+                background: Theme.hairline;
             }
 
             HorizontalLayout {
@@ -1136,7 +610,7 @@ export component AppWindow inherits Window {
                 Text {
                     text: root.status;
                     font-size: 11.5px;
-                    color: status-ta.has-hover ? Palette.espresso : Palette.muted;
+                    color: status-ta.has-hover ? Theme.text : Theme.text-muted;
                     vertical-alignment: center;
                     // Opens Done and scrolls to it; Done is the last bucket, so that's the bottom.
                     status-ta := TouchArea {
@@ -1155,7 +629,7 @@ export component AppWindow inherits Window {
                 if root.delete-armed: Text {
                     text: "Delete " + root.profile-name + (root.profile-tasks == 0 ? "?" : root.profile-tasks == 1 ? " and its task?" : " and its " + root.profile-tasks + " tasks?");
                     font-size: 11.5px;
-                    color: delete-ta.has-hover ? Palette.espresso : Palette.danger;
+                    color: delete-ta.has-hover ? Theme.text : Theme.danger;
                     vertical-alignment: center;
                     delete-ta := TouchArea {
                         mouse-cursor: pointer;
@@ -1169,14 +643,14 @@ export component AppWindow inherits Window {
                 if !root.offer-undo && !root.delete-armed: Text {
                     text: "Alt+P shows and hides";
                     font-size: 11.5px;
-                    color: Palette.faint;
+                    color: Theme.text-muted;
                     vertical-alignment: center;
                 }
 
                 if root.offer-undo && !root.delete-armed: Text {
                     text: "Undo";
                     font-size: 11.5px;
-                    color: undo-ta.has-hover ? Palette.espresso : Palette.coffee;
+                    color: undo-ta.has-hover ? Theme.text : Theme.accent;
                     vertical-alignment: center;
                     undo-ta := TouchArea {
                         mouse-cursor: pointer;
@@ -1197,7 +671,7 @@ export component AppWindow inherits Window {
                     width: 10px;
                     height: 10px;
                     commands: "M 14 6 L 6 14 M 14 11 L 11 14";
-                    stroke: grip.has-hover ? Palette.muted : Palette.faint;
+                    stroke: grip.has-hover ? Theme.text-muted : Theme.text-muted;
                     stroke-width: 1.2px;
                 }
                 grip := TouchArea {
@@ -1242,10 +716,10 @@ export component AppWindow inherits Window {
         y: 42px;
         width: 190px;
         Rectangle {
-            background: Palette.surface;
+            background: Theme.card;
             border-radius: 10px;
             border-width: 1px;
-            border-color: Palette.hairline;
+            border-color: Theme.hairline;
             drop-shadow-blur: 18px;
             drop-shadow-offset-y: 6px;
             drop-shadow-color: #2E221B26;
@@ -1257,7 +731,7 @@ export component AppWindow inherits Window {
                 for p in root.profiles: MenuRow {
                     label: p.name;
                     detail: p.open > 0 ? p.open : "";
-                    dot: p.current ? Palette.coffee : Palette.crema;
+                    dot: p.current ? Theme.accent : Theme.accent-soft;
                     clicked => {
                         root.delete-armed = false;
                         root.select-profile(p.id);
@@ -1270,7 +744,7 @@ export component AppWindow inherits Window {
                         y: 4px;
                         width: parent.width - 16px;
                         height: 1px;
-                        background: Palette.hairline;
+                        background: Theme.hairline;
                     }
                 }
 
@@ -1290,7 +764,7 @@ export component AppWindow inherits Window {
 
                 if root.profiles.length > 1: MenuRow {
                     label: "Delete " + root.profile-name;
-                    ink: Palette.danger;
+                    ink: Theme.danger;
                     clicked => {
                         root.delete-armed = true;
                     }
@@ -1340,9 +814,9 @@ export component AppWindow inherits Window {
         width: root.ghost-width;
         height: 38px;
         border-radius: 8px;
-        background: Palette.surface;
+        background: Theme.card;
         border-width: 1px;
-        border-color: Palette.crema;
+        border-color: Theme.accent-soft;
         drop-shadow-blur: 20px;
         drop-shadow-offset-y: 8px;
         drop-shadow-color: #2E221B2E;
@@ -1356,12 +830,12 @@ export component AppWindow inherits Window {
                 height: 18px;
                 border-radius: 9px;
                 border-width: 1.5px;
-                border-color: Palette.coffee;
+                border-color: Theme.accent;
             }
             Text {
                 text: root.drag-title;
                 font-size: 13.5px;
-                color: Palette.espresso;
+                color: Theme.text;
                 vertical-alignment: center;
                 overflow: elide;
             }
@@ -1373,7 +847,7 @@ export component AppWindow inherits Window {
 // The root draws the shadow; the child draws the ink 1px up-left of it.
 component InkText inherits Text {
     in property <bool> dark-bg;
-    in property <color> ink: root.dark-bg ? #FFFFFF : Palette.espresso;
+    in property <color> ink: root.dark-bg ? #FFFFFF : Theme.text;
     color: root.dark-bg ? #000000a0 : #FFFFFFc0;
     Text {
         x: -1px;
@@ -1446,7 +920,7 @@ export component WidgetWindow inherits Window {
             width: 12px;
             height: 12px;
             commands: "M 14 6 L 6 14 M 14 11 L 11 14";
-            stroke: root.dark-bg ? #FFFFFF : Palette.espresso;
+            stroke: root.dark-bg ? #FFFFFF : Theme.text;
             stroke-width: 1.4px;
             opacity: grip.has-hover ? 0.9 : 0.4;
         }
@@ -1474,10 +948,10 @@ export component WidgetWindow inherits Window {
                 spacing: 8px;
                 InkText {
                     text: "Today";
-                    font-family: Palette.serif;
+                    font-family: Theme.serif;
                     font-size: 16px;
                     dark-bg: root.dark-bg;
-                    ink: root.dark-bg ? #E8C9A6 : Palette.strength("now");
+                    ink: root.dark-bg ? #E8C9A6 : Theme.strength("now");
                 }
 
                 InkText {
@@ -1522,7 +996,7 @@ export component WidgetWindow inherits Window {
                 visible: i < rows.shown;
                 spacing: 10px;
                 Check {
-                    tint: root.dark-bg ? #FFFFFFc0 : Palette.muted;
+                    tint: root.dark-bg ? #FFFFFFc0 : Theme.text-muted;
                     toggled => {
                         root.toggle-task(t.id);
                     }
@@ -1540,9 +1014,9 @@ export component WidgetWindow inherits Window {
                     text: t.when;
                     font-size: 11px;
                     dark-bg: root.dark-bg;
-                    ink: t.overdue ? (root.dark-bg ? #F2A48F : Palette.danger)
-                        : t.soon ? (root.dark-bg ? #E8C9A6 : Palette.coffee)
-                        : (root.dark-bg ? #FFFFFF : Palette.espresso);
+                    ink: t.overdue ? (root.dark-bg ? #F2A48F : Theme.danger)
+                        : t.soon ? (root.dark-bg ? #E8C9A6 : Theme.accent)
+                        : (root.dark-bg ? #FFFFFF : Theme.text);
                     vertical-alignment: center;
                 }
             }

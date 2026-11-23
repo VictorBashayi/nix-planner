@@ -1,0 +1,305 @@
+import { Theme, TaskItem, ProfileItem, MoveOption, Icon, IconButton, Check, MenuRow, MenuLabel, DropZone } from "theme.slint";
+
+export component Editor inherits TextInput {
+    callback finished;
+    callback cancelled;
+    callback enter-pressed;
+    single-line: false;
+    wrap: word-wrap;
+    color: Theme.text;
+    selection-background-color: Theme.accent-soft;
+    selection-foreground-color: Theme.text;
+    key-pressed(event) => {
+        if (event.text == Key.Escape) {
+            root.cancelled();
+            return accept;
+        }
+        if (event.text == Key.Return && !event.modifiers.shift) {
+            root.enter-pressed();
+            return accept;
+        }
+        reject
+    }
+    changed has-focus => {
+        if (!self.has-focus) {
+            root.finished();
+        }
+    }
+}
+
+export component TaskRow inherits Rectangle {
+    in property <TaskItem> task;
+    in property <string> bucket-key;
+    in property <int> index;
+    in property <bool> drag-active;
+    in property <length> drag-y;
+    in property <bool> lifted;
+    in property <bool> drop-line;
+    // Off while searching: dropping into a filtered list has no clear index.
+    in property <bool> draggable: true;
+    in property <[ProfileItem]> profiles;
+
+    callback toggled(int);
+    // Task id, profile id.
+    callback sent(int, int);
+    callback deleted(int);
+    callback moved(int, string);
+    callback edit-live(int, bool, string);
+    callback edit-finished();
+    callback edit-cancelled(int, string, string);
+    callback drag-start(int, string, length, length, length);
+    callback drag-move(length, length);
+    callback drag-end();
+    callback drag-cancelled();
+    callback hover-drop(int);
+
+    property <bool> editing-title;
+    property <bool> editing-desc;
+    property <bool> editing: editing-title || editing-desc;
+    property <bool> drag-started;
+    property <bool> active: row-ta.has-hover || move-btn.hovered || del-btn.hovered || editing;
+    property <length> top: self.absolute-position.y;
+    property <int> zone: !root.drag-active ? 0
+        : root.drag-y >= root.top && root.drag-y < root.top + root.height / 2 ? 1
+        : root.drag-y >= root.top + root.height / 2 && root.drag-y < root.top + root.height ? 2 : 0;
+    changed zone => {
+        if (root.zone == 1) {
+            root.hover-drop(root.index);
+        } else if (root.zone == 2) {
+            root.hover-drop(root.index + 1);
+        }
+    }
+
+    border-radius: 8px;
+    background: root.active && !root.lifted ? Theme.hover : transparent;
+    opacity: root.lifted ? 0.35 : 1;
+
+    row-ta := TouchArea {
+        mouse-cursor: root.drag-started ? grabbing : default;
+        moved => {
+            if (self.pressed && root.draggable && !root.drag-started && !root.editing
+                    && abs(self.mouse-x - self.pressed-x) + abs(self.mouse-y - self.pressed-y) > 5px) {
+                root.drag-started = true;
+                root.drag-start(root.task.id, root.task.title, self.pressed-x, self.pressed-y, root.width);
+            }
+            if (root.drag-started) {
+                root.drag-move(self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
+            }
+        }
+        pointer-event(event) => {
+            if (event.kind == PointerEventKind.up && root.drag-started) {
+                root.drag-started = false;
+                root.drag-end();
+            }
+            // The list's Flickable steals quick flicks mid-drag; we then get cancel, never up.
+            if (event.kind == PointerEventKind.cancel && root.drag-started) {
+                root.drag-started = false;
+                root.drag-cancelled();
+            }
+        }
+        clicked => {
+            if (root.drag-started || root.editing) {
+                return;
+            }
+            if (self.mouse-y > 8px + title-slot.y + title-slot.height && root.task.desc != "") {
+                root.editing-desc = true;
+                desc-editor.focus();
+            } else {
+                root.editing-title = true;
+                title-editor.focus();
+            }
+        }
+    }
+
+    HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 6px;
+        padding-top: 8px;
+        padding-bottom: 8px;
+        spacing: 10px;
+
+        VerticalLayout {
+            alignment: start;
+            padding-top: 1px;
+            Check {
+                done: root.task.done;
+                tint: Theme.strength(root.bucket-key);
+                toggled => {
+                    root.toggled(root.task.id);
+                }
+            }
+        }
+
+        VerticalLayout {
+            horizontal-stretch: 1;
+            spacing: 2px;
+            alignment: center;
+
+            title-slot := Rectangle {
+                min-height: 20px;
+                if !root.editing-title: Text {
+                    width: 100%;
+                    text: root.task.title;
+                    // Single line keeps row heights exact; wrapped text throws off the list's scroll height.
+                    overflow: elide;
+                    font-size: 13.5px;
+                    color: root.task.done ? Theme.text-muted : Theme.text;
+                    vertical-alignment: center;
+                }
+                title-editor := Editor {
+                    visible: root.editing-title;
+                    enabled: root.editing-title;
+                    width: 100%;
+                    text: root.task.title;
+                    font-size: 13.5px;
+                    edited => {
+                        root.edit-live(root.task.id, false, self.text);
+                    }
+                    enter-pressed => {
+                        if (root.task.desc == "") {
+                            root.editing-desc = true;
+                            desc-editor.focus();
+                            root.editing-title = false;
+                        } else {
+                            root.editing-title = false;
+                            root.edit-finished();
+                        }
+                    }
+                    cancelled => {
+                        root.editing-title = false;
+                        root.edit-cancelled(root.task.id, root.task.title, root.task.desc);
+                    }
+                    finished => {
+                        if (root.editing-title) {
+                            root.editing-title = false;
+                            if (!root.editing-desc) {
+                                root.edit-finished();
+                            }
+                        }
+                    }
+                }
+            }
+
+            if root.task.desc != "" && !root.editing-desc: Text {
+                text: root.task.desc;
+                overflow: elide;
+                font-size: 12px;
+                color: Theme.text-muted;
+            }
+            desc-editor := Editor {
+                visible: root.editing-desc;
+                enabled: root.editing-desc;
+                height: root.editing-desc ? self.preferred-height : 0px;
+                text: root.task.desc;
+                font-size: 12px;
+                color: Theme.text-muted;
+                edited => {
+                    root.edit-live(root.task.id, true, self.text);
+                }
+                enter-pressed => {
+                    root.editing-desc = false;
+                    root.edit-finished();
+                }
+                cancelled => {
+                    root.editing-desc = false;
+                    root.edit-cancelled(root.task.id, root.task.title, root.task.desc);
+                }
+                finished => {
+                    if (root.editing-desc) {
+                        root.editing-desc = false;
+                        root.edit-finished();
+                    }
+                }
+                if self.text == "" && root.editing-desc: Text {
+                    text: "Add a note";
+                    font-size: 12px;
+                    color: Theme.text-muted;
+                }
+            }
+
+            if root.task.when != "": Text {
+                text: root.task.when;
+                overflow: elide;
+                font-size: 11px;
+                color: root.task.overdue ? Theme.danger : root.task.soon ? Theme.accent : Theme.text-muted;
+            }
+        }
+
+        HorizontalLayout {
+            // Keeps the buttons at the row's right edge, however short the title.
+            horizontal-stretch: 0;
+            alignment: start;
+            spacing: 0px;
+            opacity: root.active && !root.lifted ? 1 : 0;
+            move-btn := IconButton {
+                icon: "M 3.5 8 L 3.6 8 M 8 8 L 8.1 8 M 12.5 8 L 12.6 8";
+                clicked => {
+                    menu.show();
+                }
+            }
+            del-btn := IconButton {
+                icon: "M 4.5 4.5 L 11.5 11.5 M 11.5 4.5 L 4.5 11.5";
+                hover-tint: Theme.danger;
+                clicked => {
+                    root.deleted(root.task.id);
+                }
+            }
+        }
+    }
+
+    if root.drop-line: Rectangle {
+        x: 8px;
+        y: -1px;
+        width: parent.width - 16px;
+        height: 2px;
+        border-radius: 1px;
+        background: Theme.accent;
+    }
+
+    menu := PopupWindow {
+        x: root.width - 150px;
+        y: 36px;
+        width: 140px;
+        Rectangle {
+            background: Theme.card;
+            border-radius: 10px;
+            border-width: 1px;
+            border-color: Theme.hairline;
+            drop-shadow-blur: 18px;
+            drop-shadow-offset-y: 6px;
+            drop-shadow-color: #2E221B26;
+            VerticalLayout {
+                padding: 4px;
+                MenuLabel {
+                    text: "Move to";
+                }
+                for opt in [
+                    { key: "now", title: "Today" },
+                    { key: "soon", title: "This week" },
+                    { key: "later", title: "Someday" },
+                    { key: "done", title: "Done" },
+                ]: VerticalLayout {
+                    if opt.key != root.bucket-key: MenuRow {
+                        label: opt.title;
+                        dot: Theme.strength(opt.key);
+                        clicked => {
+                            root.moved(root.task.id, opt.key);
+                        }
+                    }
+                }
+                if root.profiles.length > 1: MenuLabel {
+                    text: "Send to";
+                }
+                for p in root.profiles: VerticalLayout {
+                    if !p.current: MenuRow {
+                        label: p.name;
+                        dot: Theme.accent-soft;
+                        clicked => {
+                            root.sent(root.task.id, p.id);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

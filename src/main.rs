@@ -38,6 +38,8 @@ struct App {
     urgencies: RefCell<Vec<(u64, due::Urgency)>>,
     /// The widget's size and inked height when its click-through shape was last set.
     shape: Cell<[i32; 3]>,
+    /// Windows apps are in dark mode.
+    dark: Cell<bool>,
 }
 
 impl App {
@@ -251,8 +253,26 @@ impl App {
         w.set_profile(if state.profiles.len() > 1 { state.profile_name(state.profile).into() } else { SharedString::new() });
         *self.urgencies.borrow_mut() = urgencies(&state, date, minute);
         drop(state);
+        self.apply_theme();
         // The rows just changed, and so has the part of the widget that takes clicks.
         self.tend();
+    }
+
+    /// Colours both windows from the current profile's seed and the Windows mode.
+    fn apply_theme(&self) {
+        let state = self.state.borrow();
+        let seed = state
+            .profiles
+            .iter()
+            .find(|p| p.id == state.profile)
+            .and_then(|p| p.colour.as_deref())
+            .and_then(theme::Rgb::parse)
+            .unwrap_or_else(|| theme::Rgb::parse(theme::SWATCHES[0]).expect("swatches are valid"));
+        let t = theme::tokens(seed, self.dark.get());
+        push_theme(&self.ui().global::<Theme>(), &t);
+        if let Some(w) = self.widget.upgrade() {
+            push_theme(&w.global::<Theme>(), &t);
+        }
     }
 
     fn show(self: &Rc<Self>) {
@@ -302,6 +322,25 @@ impl App {
 }
 
 /// How urgent an open task's due date is; `None` for done tasks and tasks without one.
+fn push_theme(g: &Theme, t: &theme::Tokens) {
+    let c = |r: &theme::Rgb| slint::Color::from_rgb_u8(r.0, r.1, r.2);
+    g.set_chrome(c(&t.chrome));
+    g.set_canvas(c(&t.canvas));
+    g.set_card(c(&t.card));
+    g.set_card_alt(c(&t.card_alt));
+    g.set_accent_soft(c(&t.accent_soft));
+    g.set_accent(c(&t.accent));
+    g.set_text(c(&t.text));
+    g.set_text_muted(c(&t.text_muted));
+    g.set_hairline(c(&t.hairline));
+    g.set_hover(c(&t.hover));
+    g.set_danger(c(&t.danger));
+    g.set_now(c(&t.now));
+    g.set_soon(c(&t.soon));
+    g.set_later(c(&t.later));
+    g.set_done(c(&t.done));
+}
+
 fn urgency(t: &store::Task, today: due::Date, minute: u32) -> Option<due::Urgency> {
     t.due().filter(|_| !t.completed).map(|d| d.urgency(today, minute))
 }
@@ -648,6 +687,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         day: Cell::new(None),
         urgencies: RefCell::new(Vec::new()),
         shape: Cell::new([0; 3]),
+        dark: Cell::new(theme::system_dark()),
     });
     app.refresh();
 
@@ -953,6 +993,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let w = widget.as_weak();
         let a = app.clone();
         move || {
+            let dark = theme::system_dark();
+            if dark != a.dark.get() {
+                a.dark.set(dark);
+                a.apply_theme();
+            }
             a.check_clock();
             a.tend();
             a.remember_widget();
