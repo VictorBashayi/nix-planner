@@ -4,6 +4,7 @@ mod due;
 mod icon;
 mod notify;
 mod store;
+mod theme;
 
 use global_hotkey::hotkey::{Code, HotKey, Modifiers};
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
