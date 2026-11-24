@@ -15,7 +15,6 @@ export struct TaskItem {
 export struct BucketItem {
     key: string,
     title: string,
-    collapsed: bool,
     empty-text: string,
     tasks: [TaskItem],
 }
@@ -25,6 +24,16 @@ export struct ProfileItem {
     name: string,
     // Open tasks in it.
     open: int,
+    // All tasks in it, done ones included.
+    tasks: int,
+    current: bool,
+    colour: color,
+}
+
+export struct SideBucket {
+    key: string,
+    title: string,
+    count: int,
     current: bool,
 }
 

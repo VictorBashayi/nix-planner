@@ -267,19 +267,6 @@ impl State {
         }
     }
 
-    pub fn is_collapsed(&self, bucket: Bucket) -> bool {
-        self.collapsed.get(bucket.key()).copied().unwrap_or(false)
-    }
-
-    pub fn toggle_collapsed(&mut self, bucket: Bucket) {
-        let c = !self.is_collapsed(bucket);
-        self.collapsed.insert(bucket.key().to_string(), c);
-    }
-
-    pub fn expand(&mut self, bucket: Bucket) {
-        self.collapsed.insert(bucket.key().to_string(), false);
-    }
-
     fn find_mut(&mut self, id: u64) -> Option<&mut Task> {
         self.tasks.iter_mut().find(|t| t.id == id)
     }
@@ -310,9 +297,6 @@ impl State {
             },
         );
         self.move_to(id, bucket, 0);
-        if bucket != Bucket::Done {
-            self.collapsed.insert(bucket.key().to_string(), false);
-        }
         Some(id)
     }
 
@@ -469,13 +453,6 @@ impl State {
         }
         self.tasks.retain(|t| !t.text.is_empty());
     }
-
-    /// Open and done task counts for the current profile.
-    pub fn counts(&self) -> (usize, usize) {
-        let all = self.tasks.iter().filter(|t| t.profile == self.profile);
-        let done = all.clone().filter(|t| t.completed).count();
-        (all.count() - done, done)
-    }
 }
 
 /// Undo and redo for the task list, kept as whole-list snapshots. Only the tasks
@@ -578,24 +555,6 @@ mod tests {
         s.add("b", Bucket::Now);
         assert_eq!(ids(&s, Bucket::Now), vec![2, 1]);
         assert_eq!(s.tasks[0].text, "b");
-    }
-
-    #[test]
-    fn add_uncollapses_target_bucket() {
-        let mut s = State::default();
-        s.toggle_collapsed(Bucket::Soon);
-        s.add("x", Bucket::Soon);
-        assert!(!s.is_collapsed(Bucket::Soon));
-    }
-
-    #[test]
-    fn expand_opens_a_collapsed_bucket_and_keeps_an_open_one_open() {
-        let mut s = State::default();
-        assert!(s.is_collapsed(Bucket::Done));
-        s.expand(Bucket::Done);
-        assert!(!s.is_collapsed(Bucket::Done));
-        s.expand(Bucket::Done);
-        assert!(!s.is_collapsed(Bucket::Done));
     }
 
     #[test]
@@ -739,7 +698,7 @@ mod tests {
         s.move_to(4, Bucket::Now, 2);
         assert_eq!(ids(&s, Bucket::Now), vec![3, 4]);
         s.toggle(3);
-        assert_eq!(s.counts(), (1, 1));
+        assert_eq!((ids(&s, Bucket::Now).len(), ids(&s, Bucket::Done).len()), (1, 1));
 
         s.select_profile(0);
         s.select_profile(99);
@@ -859,7 +818,8 @@ mod tests {
         assert_eq!(s.tasks.len(), 2);
         assert_eq!(s.selected_bucket, Bucket::Later);
         assert_eq!(s.tasks[1].previous_bucket, Some(Bucket::Now));
-        assert!(s.is_collapsed(Bucket::Done));
+        // Kept in the file for older builds, though the UI no longer collapses buckets.
+        assert_eq!(s.collapsed.get("done"), Some(&true));
         assert_eq!(s.next_id, 6);
         // A file from before profiles: everything is in the first profile.
         assert_eq!((s.profile, s.profile_name(0)), (0, "Personal"));

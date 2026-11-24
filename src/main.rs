@@ -173,7 +173,9 @@ impl App {
         let (date, minute) = now_local();
         let query = self.query.borrow();
         let filtering = !query.is_empty();
-        let buckets: Vec<BucketItem> = Bucket::ALL
+        // One page, or while searching every bucket with matches.
+        let shown: Vec<Bucket> = if filtering { Bucket::ALL.to_vec() } else { vec![state.page] };
+        let buckets: Vec<BucketItem> = shown
             .into_iter()
             .filter_map(|b| {
                 let tasks: Vec<TaskItem> = state
@@ -204,20 +206,26 @@ impl App {
                 Some(BucketItem {
                     key: b.key().into(),
                     title: bucket_title(b).into(),
-                    collapsed: state.is_collapsed(b) && !filtering,
                     empty_text: empty_text(b).into(),
                     tasks: ModelRc::new(VecModel::from(tasks)),
                 })
             })
             .collect();
         ui.set_buckets(ModelRc::new(VecModel::from(buckets)));
-        ui.set_selected(match state.selected_bucket {
-            Bucket::Soon => 1,
-            Bucket::Later => 2,
-            _ => 0,
-        });
-        ui.set_status(status_text(state.counts()).into());
-        ui.set_has_done(state.counts().1 > 0);
+        ui.set_page(state.page.key().into());
+        let counts = side_counts(&state);
+        ui.set_side_buckets(ModelRc::new(VecModel::from(
+            Bucket::ALL
+                .into_iter()
+                .zip(counts)
+                .map(|(b, n)| SideBucket {
+                    key: b.key().into(),
+                    title: bucket_title(b).into(),
+                    count: n as i32,
+                    current: b == state.page,
+                })
+                .collect::<Vec<_>>(),
+        )));
         ui.set_profiles(ModelRc::new(VecModel::from(
             state
                 .profiles
@@ -226,12 +234,17 @@ impl App {
                     id: p.id as i32,
                     name: p.name.as_str().into(),
                     open: state.tasks.iter().filter(|t| t.profile == p.id && !t.completed).count() as i32,
+                    tasks: state.tasks.iter().filter(|t| t.profile == p.id).count() as i32,
                     current: p.id == state.profile,
+                    colour: p
+                        .colour
+                        .as_deref()
+                        .and_then(theme::Rgb::parse)
+                        .map(|c| slint::Color::from_rgb_u8(c.0, c.1, c.2))
+                        .unwrap_or_default(),
                 })
                 .collect::<Vec<_>>(),
         )));
-        ui.set_profile_name(state.profile_name(state.profile).into());
-        ui.set_profile_tasks(state.tasks.iter().filter(|t| t.profile == state.profile).count() as i32);
 
         // The widget shows today's open tasks, as many as fit its height.
         let w = self.widget.upgrade().expect("widget outlives app state");
@@ -360,20 +373,17 @@ fn bucket_title(b: Bucket) -> &'static str {
 
 fn empty_text(b: Bucket) -> &'static str {
     match b {
-        Bucket::Now => "Nothing for today yet.",
-        Bucket::Soon => "Nothing planned this week.",
-        Bucket::Later => "Ideas for someday go here.",
-        Bucket::Done => "Finished tasks land here.",
+        Bucket::Now => "Nothing for today",
+        Bucket::Soon => "Nothing this week",
+        Bucket::Later => "Nothing for someday",
+        Bucket::Done => "Nothing done yet",
     }
 }
 
-fn status_text((open, done): (usize, usize)) -> String {
-    match (open, done) {
-        (0, 0) => "No tasks yet".into(),
-        (o, 0) => format!("{o} open"),
-        (0, d) => format!("All done, {d} finished"),
-        (o, d) => format!("{o} open, {d} done"),
-    }
+/// Sidebar counts for the current profile: open tasks in Today, This week and
+/// Someday, then finished ones.
+fn side_counts(state: &State) -> [usize; 4] {
+    Bucket::ALL.map(|b| state.tasks_in(b).filter(|t| t.completed == (b == Bucket::Done)).count())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -716,8 +726,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
     {
         let a = app.clone();
-        ui.on_select_bucket(move |i| {
-            a.state.borrow_mut().selected_bucket = [Bucket::Now, Bucket::Soon, Bucket::Later][i.clamp(0, 2) as usize];
+        ui.on_select_page(move |key| {
+            let Some(b) = Bucket::from_key(&key) else { return };
+            a.state.borrow_mut().set_page(b);
             a.refresh();
             a.schedule_save();
         });
@@ -774,15 +785,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             a.changed();
         });
     }
-    {
-        let a = app.clone();
-        ui.on_toggle_collapsed(move |key| {
-            if let Some(b) = Bucket::from_key(&key) {
-                a.state.borrow_mut().toggle_collapsed(b);
-                a.changed();
-            }
-        });
-    }
     ui.on_clear_done(on(|a| {
         a.state.borrow_mut().clear_done();
         a.changed();
@@ -834,10 +836,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     ui.on_undo(on(|a| a.step_history(false)));
     ui.on_redo(on(|a| a.step_history(true)));
-    ui.on_show_done(on(|a| {
-        a.state.borrow_mut().expand(Bucket::Done);
-        a.changed();
-    }));
     ui.on_hide_window(on(|a| a.hide()));
     {
         let w = ui.as_weak();
@@ -1034,6 +1032,19 @@ mod tests {
 
     fn day(year: u16, month: u16, day: u16, weekday: u16) -> Day {
         Day { year, month, day, weekday }
+    }
+
+    #[test]
+    fn sidebar_counts_follow_the_current_profile() {
+        let mut s = State::default();
+        s.add("a", Bucket::Now);
+        s.add("b", Bucket::Later);
+        let id = s.add("c", Bucket::Soon).unwrap();
+        s.toggle(id);
+        s.profile = 1;
+        s.add("other", Bucket::Now);
+        s.profile = 0;
+        assert_eq!(side_counts(&s), [1, 0, 1, 1]);
     }
 
     #[test]

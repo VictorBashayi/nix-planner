@@ -1,0 +1,229 @@
+import { Theme, ProfileItem, SideBucket, Icon } from "theme.slint";
+
+// Line icons for the bucket pages, on a 16 × 16 grid.
+export global BucketIcons {
+    public pure function of(key: string) -> string {
+        if (key == "now") {
+            return "M 8 5 A 3 3 0 1 0 8 11 A 3 3 0 1 0 8 5 M 8 1.5 L 8 2.5 M 8 13.5 L 8 14.5 M 1.5 8 L 2.5 8 M 13.5 8 L 14.5 8 M 3.4 3.4 L 4.1 4.1 M 11.9 11.9 L 12.6 12.6 M 3.4 12.6 L 4.1 11.9 M 11.9 4.1 L 12.6 3.4";
+        }
+        if (key == "soon") {
+            return "M 2.5 4 L 13.5 4 L 13.5 13.5 L 2.5 13.5 Z M 2.5 7 L 13.5 7 M 5.5 2.5 L 5.5 5 M 10.5 2.5 L 10.5 5";
+        }
+        if (key == "later") {
+            return "M 8 8 C 6 5 2.5 5 2.5 8 C 2.5 11 6 11 8 8 C 10 5 13.5 5 13.5 8 C 13.5 11 10 11 8 8";
+        }
+        return "M 8 2 A 6 6 0 1 0 8 14 A 6 6 0 1 0 8 2 M 5.5 8.2 L 7.3 10 L 10.8 6.3";
+    }
+}
+
+component SideRow inherits Rectangle {
+    in property <string> label;
+    in property <string> count;
+    in property <bool> current;
+    // A dragged task is over this row.
+    in property <bool> highlight;
+    in property <color> dot: transparent;
+    in property <string> icon;
+    in property <color> icon-ink: Theme.text-muted;
+    in property <color> ink: Theme.text;
+    callback clicked;
+    // Pointer position in window coordinates.
+    callback right-clicked(length, length);
+    height: 36px;
+    border-radius: 18px;
+    background: root.current || root.highlight ? Theme.accent-soft : ta.has-hover ? Theme.hover : transparent;
+    HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 12px;
+        spacing: 10px;
+        if root.icon != "": VerticalLayout {
+            alignment: center;
+            Icon {
+                width: 18px;
+                height: 18px;
+                commands: root.icon;
+                stroke: root.icon-ink;
+            }
+        }
+        if root.icon == "": VerticalLayout {
+            alignment: center;
+            Rectangle {
+                width: 10px;
+                height: 10px;
+                border-radius: 5px;
+                background: root.dot;
+            }
+        }
+        Text {
+            horizontal-stretch: 1;
+            text: root.label;
+            font-size: 13px;
+            font-weight: root.current ? 600 : 400;
+            color: root.ink;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+        Text {
+            text: root.count;
+            font-size: 12px;
+            color: Theme.text-muted;
+            vertical-alignment: center;
+        }
+    }
+
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => {
+            root.clicked();
+        }
+        pointer-event(event) => {
+            if (event.kind == PointerEventKind.down && event.button == PointerEventButton.right) {
+                root.right-clicked(root.absolute-position.x + self.mouse-x, root.absolute-position.y + self.mouse-y);
+            }
+        }
+    }
+}
+
+export component Sidebar inherits Rectangle {
+    in property <[ProfileItem]> profiles;
+    in property <[SideBucket]> buckets;
+    callback select-profile(int);
+    callback select-page(string);
+    callback add-profile(string);
+    // Profile id and pointer position in window coordinates.
+    callback profile-menu(int, length, length);
+    callback start-move();
+    // Hands keyboard focus back to the main area.
+    callback done-naming();
+
+    property <bool> naming;
+
+    public function new-profile() {
+        name-input.text = "";
+        root.naming = true;
+        name-input.focus();
+    }
+
+    width: 150px;
+    background: Theme.chrome;
+
+    VerticalLayout {
+        padding-left: 8px;
+        padding-right: 8px;
+        padding-bottom: 8px;
+        spacing: 2px;
+
+        Rectangle {
+            height: 52px;
+            TouchArea {
+                pointer-event(event) => {
+                    if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left) {
+                        root.start-move();
+                    }
+                }
+            }
+            Text {
+                x: 12px;
+                height: parent.height;
+                text: "Nix Planner";
+                font-family: Theme.serif;
+                font-size: 15px;
+                color: Theme.text;
+                vertical-alignment: center;
+            }
+        }
+
+        for p in root.profiles: SideRow {
+            label: p.name;
+            dot: p.colour;
+            current: p.current;
+            clicked => {
+                root.select-profile(p.id);
+            }
+            right-clicked(x, y) => {
+                root.profile-menu(p.id, x, y);
+            }
+        }
+
+        if !root.naming: SideRow {
+            label: "New profile";
+            ink: Theme.text-muted;
+            icon: "M 8 3.5 L 8 12.5 M 3.5 8 L 12.5 8";
+            clicked => {
+                root.new-profile();
+            }
+        }
+
+        Rectangle {
+            height: root.naming ? 36px : 0px;
+            visible: root.naming;
+            border-radius: 18px;
+            background: Theme.card;
+            border-width: 1px;
+            border-color: Theme.accent;
+            name-input := TextInput {
+                x: 14px;
+                width: parent.width - 28px;
+                height: parent.height;
+                enabled: root.naming;
+                vertical-alignment: center;
+                font-size: 13px;
+                color: Theme.text;
+                selection-background-color: Theme.accent-soft;
+                selection-foreground-color: Theme.text;
+                accepted => {
+                    root.add-profile(self.text);
+                    root.naming = false;
+                    root.done-naming();
+                }
+                key-pressed(event) => {
+                    if (event.text == Key.Escape) {
+                        root.naming = false;
+                        root.done-naming();
+                        return accept;
+                    }
+                    reject
+                }
+                changed has-focus => {
+                    if (!self.has-focus) {
+                        root.naming = false;
+                    }
+                }
+            }
+            if name-input.text == "": Text {
+                x: 14px;
+                height: parent.height;
+                text: "Profile name";
+                font-size: 13px;
+                color: Theme.text-muted;
+                vertical-alignment: center;
+            }
+        }
+
+        Rectangle {
+            height: 13px;
+            Rectangle {
+                x: 12px;
+                y: 6px;
+                width: parent.width - 24px;
+                height: 1px;
+                background: Theme.hairline;
+            }
+        }
+
+        for b in root.buckets: SideRow {
+            label: b.title;
+            count: b.count > 0 ? b.count : "";
+            current: b.current;
+            icon: BucketIcons.of(b.key);
+            icon-ink: Theme.strength(b.key);
+            clicked => {
+                root.select-page(b.key);
+            }
+        }
+
+        Rectangle {
+            vertical-stretch: 1;
+        }
+    }
+}

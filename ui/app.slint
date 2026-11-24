@@ -1,31 +1,30 @@
-import { Theme, TaskItem, BucketItem, ProfileItem, MoveOption, Icon, IconButton, Check, MenuRow, MenuLabel, DropZone, Chip } from "theme.slint";
+import { Theme, TaskItem, BucketItem, ProfileItem, SideBucket, MoveOption, Icon, IconButton, Check, MenuRow, MenuLabel, DropZone, Chip } from "theme.slint";
 import { TaskRow, Editor } from "task_row.slint";
-export { Theme, TaskItem, BucketItem, ProfileItem }
+import { Sidebar, BucketIcons } from "sidebar.slint";
+export { Theme, TaskItem, BucketItem, ProfileItem, SideBucket }
 
 export component AppWindow inherits Window {
     title: "Nix Planner";
     no-frame: true;
     always-on-top: root.pinned;
-    preferred-width: 400px;
+    preferred-width: 540px;
     preferred-height: 640px;
-    min-width: 320px;
+    min-width: 460px;
     min-height: 360px;
-    background: Theme.canvas;
+    background: Theme.chrome;
     default-font-family: "Segoe UI Variable Text";
     default-font-size: 13px;
 
+    // The page on show; while searching with text, every bucket that has matches.
     in property <[BucketItem]> buckets;
-    in property <int> selected: 0;
-    in property <string> status;
-    in property <bool> has-done;
-    // Set from Rust after a delete or clear; the footer then offers Undo for a while.
+    // Key of the page on show: "now", "soon", "later" or "done".
+    in property <string> page: "now";
+    in property <[SideBucket]> side-buckets;
+    // Set from Rust after a delete or clear; Undo is then offered for a while.
     in-out property <bool> offer-undo;
     in property <string> today;
     in-out property <bool> pinned: true;
     in property <[ProfileItem]> profiles;
-    in property <string> profile-name;
-    // How many tasks the current profile holds, done ones included.
-    in property <int> profile-tasks;
 
     callback select-profile(int);
     callback next-profile();
@@ -38,15 +37,13 @@ export component AppWindow inherits Window {
     callback tend-requested();
 
     callback add-task(string);
-    callback select-bucket(int);
+    callback select-page(string);
     callback toggle-task(int);
     callback delete-task(int);
     callback move-task(int, string, int);
     callback edit-live(int, bool, string);
     callback edit-finished();
     callback edit-cancelled(int, string, string);
-    callback toggle-collapsed(string);
-    callback show-done();
     callback clear-done();
     callback undo();
     callback redo();
@@ -79,10 +76,14 @@ export component AppWindow inherits Window {
     // The add box and the search box share a slot; Ctrl+F swaps them.
     property <bool> searching;
     property <bool> filtering: search-input.text != "";
+    property <bool> on-done: root.page == "done";
+    property <int> page-count: root.buckets.length > 0 ? root.buckets[0].tasks.length : 0;
 
     public function focus-input() {
         if (root.searching) {
             search-input.focus();
+        } else if (root.on-done) {
+            keys.focus();
         } else {
             add-input.focus();
         }
@@ -97,22 +98,18 @@ export component AppWindow inherits Window {
         search-input.text = "";
         root.search("");
         root.searching = false;
-        add-input.focus();
+        root.focus-input();
     }
 
-    // The profile name in the title bar turns into a text box: 1 names a new profile,
-    // 2 renames the current one.
-    property <int> naming;
-    // The mode picked in the profile menu. The menu hands focus back as it closes,
-    // which would end the naming at once, so the text box opens a moment later.
-    property <int> naming-next;
-    property <bool> delete-armed;
-
-    function name-profile(mode: int) {
-        name-input.text = mode == 2 ? root.profile-name : "";
-        root.naming = mode;
-        name-input.focus();
-        name-input.select-all();
+    function go(key: string) {
+        if (root.searching) {
+            search-input.text = "";
+            root.search("");
+            root.searching = false;
+        }
+        root.clear-armed = false;
+        root.select-page(key);
+        root.focus-input();
     }
 
     function set-drop(key: string, index: int) {
@@ -120,171 +117,381 @@ export component AppWindow inherits Window {
         root.drop-index = index;
     }
 
-    VerticalLayout {
-        // Title bar
-        Rectangle {
-            height: 48px;
-            TouchArea {
-                pointer-event(event) => {
-                    if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left) {
-                        root.start-move();
-                    }
+    function title-of(key: string) -> string {
+        if (key == "now") {
+            return "Today";
+        }
+        if (key == "soon") {
+            return "This week";
+        }
+        if (key == "later") {
+            return "Someday";
+        }
+        return "Done";
+    }
+
+    // Shortcuts that work wherever focus is; text boxes pass on keys they don't use.
+    keys := FocusScope {
+        key-pressed(event) => {
+            if (event.text == Key.Escape) {
+                root.hide-window();
+                return accept;
+            }
+            if (event.modifiers.control) {
+                if (event.text == "f") {
+                    root.open-search();
+                    return accept;
+                }
+                if (event.text == Key.Tab) {
+                    root.next-profile();
+                    return accept;
+                }
+                if (event.text == "1") {
+                    root.go("now");
+                    return accept;
+                }
+                if (event.text == "2") {
+                    root.go("soon");
+                    return accept;
+                }
+                if (event.text == "3") {
+                    root.go("later");
+                    return accept;
+                }
+                if (event.text == "4") {
+                    root.go("done");
+                    return accept;
+                }
+                if (event.text == "z" && !event.modifiers.shift) {
+                    root.undo();
+                    return accept;
+                }
+                if (event.text == "y" || ((event.text == "z" || event.text == "Z") && event.modifiers.shift)) {
+                    root.redo();
+                    return accept;
                 }
             }
-
-            HorizontalLayout {
-                padding-left: 20px;
-                padding-right: 10px;
-                padding-top: 10px;
-                spacing: 2px;
-                // The profile on show; click for the others.
-                if root.naming == 0: Rectangle {
-                    horizontal-stretch: 0;
-                    HorizontalLayout {
-                        spacing: 5px;
-                        Text {
-                            text: root.profile-name;
-                            font-family: Theme.serif;
-                            font-size: 15px;
-                            color: Theme.text;
-                            vertical-alignment: center;
-                        }
-
-                        VerticalLayout {
-                            alignment: center;
-                            padding-top: 2px;
-                            Icon {
-                                width: 11px;
-                                height: 11px;
-                                commands: "M 3.5 6 L 8 10.5 L 12.5 6";
-                                stroke: profile-ta.has-hover ? Theme.text : Theme.text-muted;
-                            }
-                        }
-                    }
-
-                    profile-ta := TouchArea {
-                        mouse-cursor: pointer;
-                        clicked => {
-                            profile-menu.show();
-                        }
-                    }
-                }
-
-                name-input := TextInput {
-                    visible: root.naming != 0;
-                    enabled: root.naming != 0;
-                    horizontal-stretch: 0;
-                    width: root.naming != 0 ? 130px : 0px;
-                    vertical-alignment: center;
-                    font-family: Theme.serif;
-                    font-size: 15px;
-                    color: Theme.text;
-                    selection-background-color: Theme.accent-soft;
-                    selection-foreground-color: Theme.text;
-                    accepted => {
-                        if (root.naming == 1) {
-                            root.add-profile(self.text);
-                        } else if (root.naming == 2) {
-                            root.rename-profile(self.text);
-                        }
-                        root.naming = 0;
-                        root.focus-input();
-                    }
-                    key-pressed(event) => {
-                        if (event.text == Key.Escape) {
-                            root.naming = 0;
-                            root.focus-input();
-                            return accept;
-                        }
-                        reject
-                    }
-                    changed has-focus => {
-                        if (!self.has-focus) {
-                            root.naming = 0;
-                        }
-                    }
-                    if self.text == "" && root.naming != 0: Text {
-                        height: parent.height;
-                        text: "Profile name";
-                        font-family: Theme.serif;
-                        font-size: 15px;
-                        color: Theme.text-muted;
-                        vertical-alignment: center;
-                    }
-                }
-
-                Rectangle {
-                    width: 8px;
-                }
-
-                Text {
-                    horizontal-stretch: 1;
-                    text: root.today;
-                    font-size: 11.5px;
-                    color: Theme.text-muted;
-                    vertical-alignment: center;
-                    overflow: elide;
-                }
-
-                VerticalLayout {
-                    alignment: center;
-                    IconButton {
-                        active: root.searching;
-                        icon: "M 7 3 A 4 4 0 1 0 7 11 A 4 4 0 1 0 7 3 M 10 10 L 13 13";
-                        clicked => {
-                            if (root.searching) {
-                                root.close-search();
-                            } else {
-                                root.open-search();
-                            }
-                        }
-                    }
-                }
-
-                VerticalLayout {
-                    alignment: center;
-                    IconButton {
-                        active: root.pinned;
-                        icon: "M 6 2.5 L 10 2.5 M 6.8 2.5 L 6.3 7 L 4.5 9 L 11.5 9 L 9.7 7 L 9.2 2.5 M 8 9 L 8 13.5";
-                        clicked => {
-                            root.pinned = !root.pinned;
-                        }
-                    }
-                }
-
-                VerticalLayout {
-                    alignment: center;
-                    IconButton {
-                        icon: "M 4 8 L 12 8";
-                        clicked => {
-                            root.hide-window();
-                        }
-                    }
-                }
-            }
+            reject
         }
 
-        // Quick add
-        VerticalLayout {
-            padding-left: 16px;
-            padding-right: 16px;
-            padding-top: 8px;
-            padding-bottom: 6px;
-            spacing: 10px;
+        HorizontalLayout {
+            Sidebar {
+                profiles: root.profiles;
+                buckets: root.side-buckets;
+                select-profile(id) => {
+                    root.select-profile(id);
+                    root.focus-input();
+                }
+                select-page(key) => {
+                    root.go(key);
+                }
+                add-profile(name) => {
+                    root.add-profile(name);
+                }
+                done-naming => {
+                    root.focus-input();
+                }
+                start-move => {
+                    root.start-move();
+                }
+            }
 
-            Rectangle {
-                height: 42px;
-                border-radius: 10px;
-                background: Theme.card;
-                border-width: 1px;
-                border-color: add-input.has-focus || search-input.has-focus ? Theme.accent : Theme.hairline;
+            main := Rectangle {
+                background: Theme.canvas;
+                border-top-left-radius: 16px;
 
+                VerticalLayout {
+                    // Title bar
+                    Rectangle {
+                        height: 52px;
+                        TouchArea {
+                            pointer-event(event) => {
+                                if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left) {
+                                    root.start-move();
+                                }
+                            }
+                        }
+
+                        HorizontalLayout {
+                            padding-left: 20px;
+                            padding-right: 10px;
+                            spacing: 4px;
+                            Text {
+                                text: root.searching ? "Search" : root.title-of(root.page);
+                                font-family: Theme.serif;
+                                font-size: 20px;
+                                color: root.searching ? Theme.text : Theme.strength(root.page);
+                                vertical-alignment: center;
+                            }
+
+                            Rectangle {
+                                width: 8px;
+                            }
+
+                            Text {
+                                horizontal-stretch: 1;
+                                text: root.today;
+                                font-size: 11.5px;
+                                color: Theme.text-muted;
+                                vertical-alignment: center;
+                                overflow: elide;
+                            }
+
+                            // Two clicks to clear: the first arms it for 3 seconds.
+                            if root.on-done && !root.searching && root.page-count > 0: VerticalLayout {
+                                alignment: center;
+                                Rectangle {
+                                    height: 32px;
+                                    border-radius: 16px;
+                                    background: root.clear-armed ? Theme.accent-soft : clear-ta.has-hover ? Theme.hover : transparent;
+                                    HorizontalLayout {
+                                        padding-left: 14px;
+                                        padding-right: 14px;
+                                        Text {
+                                            text: root.clear-armed ? "Clear " + root.page-count + "?" : "Clear";
+                                            font-size: 12.5px;
+                                            color: root.clear-armed ? Theme.text : Theme.text-muted;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+                                    clear-ta := TouchArea {
+                                        mouse-cursor: pointer;
+                                        clicked => {
+                                            if (root.clear-armed) {
+                                                root.clear-armed = false;
+                                                root.clear-done();
+                                            } else {
+                                                root.clear-armed = true;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            VerticalLayout {
+                                alignment: center;
+                                IconButton {
+                                    active: root.searching;
+                                    icon: "M 7 3 A 4 4 0 1 0 7 11 A 4 4 0 1 0 7 3 M 10 10 L 13 13";
+                                    clicked => {
+                                        if (root.searching) {
+                                            root.close-search();
+                                        } else {
+                                            root.open-search();
+                                        }
+                                    }
+                                }
+                            }
+
+                            VerticalLayout {
+                                alignment: center;
+                                IconButton {
+                                    active: root.pinned;
+                                    icon: "M 6 2.5 L 10 2.5 M 6.8 2.5 L 6.3 7 L 4.5 9 L 11.5 9 L 9.7 7 L 9.2 2.5 M 8 9 L 8 13.5";
+                                    clicked => {
+                                        root.pinned = !root.pinned;
+                                    }
+                                }
+                            }
+
+                            VerticalLayout {
+                                alignment: center;
+                                IconButton {
+                                    icon: "M 4 8 L 12 8";
+                                    clicked => {
+                                        root.hide-window();
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Add box, or the search box; Done has no add box.
+                    if !root.on-done || root.searching: VerticalLayout {
+                        padding-left: 16px;
+                        padding-right: 16px;
+                        padding-top: 4px;
+                        padding-bottom: 8px;
+                        Rectangle {
+                            height: 44px;
+                            border-radius: 22px;
+                            background: Theme.card;
+                            border-width: 1px;
+                            border-color: add-input.has-focus || search-input.has-focus ? Theme.accent : transparent;
+                        }
+                    }
+
+                    // Tasks
+                    list := Flickable {
+                        content-height: column.preferred-height;
+                        // Without this the list's own height caps the window's, and a short list
+                        // (an empty page) shrinks the window to fit.
+                        max-height: 100000px;
+                        column := VerticalLayout {
+                            width: list.width;
+                            padding-left: 12px;
+                            padding-right: 12px;
+                            padding-bottom: 16px;
+                            spacing: 8px;
+
+                            if root.filtering && root.buckets.length == 0: Text {
+                                height: 120px;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                                text: "No tasks match";
+                                font-size: 13px;
+                                color: Theme.text-muted;
+                            }
+
+                            for bucket in root.buckets: VerticalLayout {
+                                spacing: 4px;
+                                if root.filtering: Text {
+                                    x: 8px;
+                                    height: 28px;
+                                    text: bucket.title;
+                                    font-size: 12px;
+                                    font-weight: 600;
+                                    color: Theme.strength(bucket.key);
+                                    vertical-alignment: bottom;
+                                }
+
+                                if bucket.tasks.length == 0 && !root.filtering: VerticalLayout {
+                                    padding-top: 96px;
+                                    spacing: 12px;
+                                    HorizontalLayout {
+                                        alignment: center;
+                                        Icon {
+                                            width: 32px;
+                                            height: 32px;
+                                            commands: BucketIcons.of(bucket.key);
+                                            stroke: Theme.strength(bucket.key);
+                                            stroke-width: 1.5px;
+                                        }
+                                    }
+                                    Text {
+                                        horizontal-alignment: center;
+                                        text: bucket.empty-text;
+                                        font-size: 13px;
+                                        color: Theme.text-muted;
+                                    }
+                                }
+
+                                if bucket.tasks.length > 0: Rectangle {
+                                    background: Theme.card;
+                                    border-radius: 16px;
+                                    VerticalLayout {
+                                        padding-top: 4px;
+                                        padding-bottom: 4px;
+                                        DropZone {
+                                            height: 6px;
+                                            drag-active: root.drag-in-list;
+                                            drag-y: root.drag-y;
+                                            drop-index: 0;
+                                            hover-drop(i) => {
+                                                root.set-drop(bucket.key, i);
+                                            }
+                                        }
+
+                                        for task[i] in bucket.tasks: VerticalLayout {
+                                            if i > 0: Rectangle {
+                                                height: 1px;
+                                                Rectangle {
+                                                    x: 52px;
+                                                    width: parent.width - 64px;
+                                                    height: 1px;
+                                                    background: Theme.hairline;
+                                                }
+                                            }
+                                            TaskRow {
+                                                task: task;
+                                                bucket-key: bucket.key;
+                                                index: i;
+                                                drag-active: root.drag-in-list;
+                                                drag-y: root.drag-y;
+                                                lifted: root.drag-id == task.id;
+                                                draggable: !root.filtering;
+                                                profiles: root.profiles;
+                                                sent(id, profile) => {
+                                                    root.send-task(id, profile);
+                                                }
+                                                drop-line: root.dragging && root.drop-bucket == bucket.key && root.drop-index == i;
+                                                toggled(id) => {
+                                                    root.toggle-task(id);
+                                                }
+                                                deleted(id) => {
+                                                    root.delete-task(id);
+                                                }
+                                                moved(id, key) => {
+                                                    root.move-task(id, key, 0);
+                                                }
+                                                edit-live(id, is-desc, text) => {
+                                                    root.edit-live(id, is-desc, text);
+                                                }
+                                                edit-finished => {
+                                                    root.edit-finished();
+                                                }
+                                                edit-cancelled(id, title, desc) => {
+                                                    root.edit-cancelled(id, title, desc);
+                                                }
+                                                hover-drop(index) => {
+                                                    root.set-drop(bucket.key, index);
+                                                }
+                                                drag-start(id, title, gx, gy, w) => {
+                                                    root.drag-title = title;
+                                                    root.grab-x = gx;
+                                                    root.grab-y = gy;
+                                                    root.ghost-width = w;
+                                                    root.drop-bucket = "";
+                                                    root.drop-index = -1;
+                                                    root.drag-id = id;
+                                                }
+                                                drag-move(x, y) => {
+                                                    root.drag-x = x;
+                                                    root.drag-y = y;
+                                                }
+                                                drag-end => {
+                                                    if (root.drag-in-list && root.drop-bucket != "") {
+                                                        root.move-task(root.drag-id, root.drop-bucket, root.drop-index);
+                                                    }
+                                                    root.drag-id = -1;
+                                                }
+                                                drag-cancelled => {
+                                                    root.drag-id = -1;
+                                                }
+                                            }
+                                        }
+
+                                        DropZone {
+                                            height: 8px;
+                                            drag-active: root.drag-in-list;
+                                            drag-y: root.drag-y;
+                                            drop-index: bucket.tasks.length;
+                                            hover-drop(i) => {
+                                                root.set-drop(bucket.key, i);
+                                            }
+                                            if root.dragging && root.drop-bucket == bucket.key && root.drop-index == bucket.tasks.length: Rectangle {
+                                                x: 12px;
+                                                y: 0px;
+                                                width: parent.width - 24px;
+                                                height: 2px;
+                                                background: Theme.accent;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Text boxes live outside the `if` above so they can always take focus.
                 add-input := TextInput {
-                    visible: !root.searching;
-                    enabled: !root.searching;
-                    x: 14px;
-                    width: parent.width - 28px;
-                    height: parent.height;
+                    visible: !root.searching && !root.on-done;
+                    enabled: !root.searching && !root.on-done;
+                    x: 16px + 18px;
+                    y: 52px + 4px;
+                    width: main.width - 32px - 36px - preview.width;
+                    height: 44px;
                     vertical-alignment: center;
                     font-size: 14px;
                     color: Theme.text;
@@ -297,11 +504,8 @@ export component AppWindow inherits Window {
                         }
                     }
                     key-pressed(event) => {
-                        if (event.text == Key.Escape) {
-                            root.hide-window();
-                            return accept;
-                        }
-                        // With an empty box, Ctrl+Z / Ctrl+Y act on tasks; otherwise on the typing.
+                        // With an empty box, Ctrl+Z / Ctrl+Y act on tasks; otherwise the box's own
+                        // undo takes them. Handled here because the box keeps them from the window.
                         if (event.modifiers.control && self.text == "") {
                             if (event.text == "z" && !event.modifiers.shift) {
                                 root.undo();
@@ -312,26 +516,6 @@ export component AppWindow inherits Window {
                                 return accept;
                             }
                         }
-                        if (event.modifiers.control && event.text == "f") {
-                            root.open-search();
-                            return accept;
-                        }
-                        if (event.modifiers.control && event.text == Key.Tab) {
-                            root.next-profile();
-                            return accept;
-                        }
-                        if (event.modifiers.control && event.text == "1") {
-                            root.select-bucket(0);
-                            return accept;
-                        }
-                        if (event.modifiers.control && event.text == "2") {
-                            root.select-bucket(1);
-                            return accept;
-                        }
-                        if (event.modifiers.control && event.text == "3") {
-                            root.select-bucket(2);
-                            return accept;
-                        }
                         reject
                     }
                 }
@@ -339,9 +523,10 @@ export component AppWindow inherits Window {
                 search-input := TextInput {
                     visible: root.searching;
                     enabled: root.searching;
-                    x: 14px;
-                    width: parent.width - 28px;
-                    height: parent.height;
+                    x: 16px + 18px;
+                    y: 52px + 4px;
+                    width: main.width - 32px - 36px;
+                    height: 44px;
                     vertical-alignment: center;
                     font-size: 14px;
                     color: Theme.text;
@@ -359,326 +544,73 @@ export component AppWindow inherits Window {
                     }
                 }
 
-                if (root.searching ? search-input.text : add-input.text) == "": Text {
-                    x: 14px;
-                    height: parent.height;
+                if (!root.on-done || root.searching) && (root.searching ? search-input.text : add-input.text) == "": Text {
+                    x: 16px + 18px;
+                    y: 52px + 4px;
+                    height: 44px;
                     vertical-alignment: center;
                     text: root.searching ? "Search tasks" : "Add a task";
                     font-size: 14px;
                     color: Theme.text-muted;
                 }
-            }
 
-            // Bucket chips, with the due-date preview filling the rest of the row.
-            HorizontalLayout {
-                HorizontalLayout {
-                    horizontal-stretch: 0;
-                    spacing: 4px;
-                    for chip[i] in [
-                        { key: "now", title: "Today" },
-                        { key: "soon", title: "This week" },
-                        { key: "later", title: "Someday" },
-                    ]: Chip {
-                        label: chip.title;
-                        key: chip.key;
-                        selected: i == root.selected;
-                        clicked => {
-                            root.select-bucket(i);
-                            add-input.focus();
-                        }
-                    }
-                }
-
-                Text {
-                    horizontal-stretch: 1;
-                    text: root.searching ? "" : root.due-preview(add-input.text);
+                preview := Text {
+                    visible: !root.searching && !root.on-done;
+                    x: main.width - 16px - 18px - self.width;
+                    y: 52px + 4px;
+                    height: 44px;
+                    text: root.searching || root.on-done ? "" : root.due-preview(add-input.text);
                     font-size: 11.5px;
                     color: Theme.accent;
-                    horizontal-alignment: right;
                     vertical-alignment: center;
-                    overflow: elide;
                 }
-            }
-        }
 
-        // Buckets
-        list := Flickable {
-            content-height: column.preferred-height;
-            // Without this the list's own height caps the window's, and a short list
-            // (an empty profile) shrinks the window to fit.
-            max-height: 100000px;
-            column := VerticalLayout {
-                width: list.width;
-                padding-left: 10px;
-                padding-right: 10px;
-                padding-bottom: 12px;
-
-                if root.filtering && root.buckets.length == 0: HorizontalLayout {
-                    padding-left: 10px;
+                if root.offer-undo: Rectangle {
+                    x: (main.width - self.width) / 2;
+                    y: main.height - 52px;
+                    width: 96px;
+                    height: 36px;
+                    border-radius: 18px;
+                    background: Theme.accent-soft;
+                    drop-shadow-blur: 12px;
+                    drop-shadow-offset-y: 4px;
+                    drop-shadow-color: #00000026;
                     Text {
-                        height: 46px;
-                        vertical-alignment: center;
-                        text: "No tasks match.";
-                        font-size: 12.5px;
-                        color: Theme.text-muted;
+                        text: "Undo";
+                        font-size: 13px;
+                        font-weight: 600;
+                        color: Theme.text;
                     }
-                }
-
-                for bucket in root.buckets: VerticalLayout {
-                    header := Rectangle {
-                        height: 46px;
-                        DropZone {
-                            drag-active: root.drag-in-list;
-                            drag-y: root.drag-y;
-                            drop-index: 0;
-                            hover-drop(i) => {
-                                root.set-drop(bucket.key, i);
-                            }
-                        }
-
-                        // Search shows every matching bucket open, so collapsing waits until it ends.
-                        header-ta := TouchArea {
-                            enabled: !root.filtering;
-                            mouse-cursor: self.enabled ? pointer : default;
-                            clicked => {
-                                root.toggle-collapsed(bucket.key);
-                            }
-                        }
-
-                        HorizontalLayout {
-                            padding-left: 10px;
-                            padding-right: 12px;
-                            padding-top: 12px;
-                            spacing: 8px;
-                            Text {
-                                text: bucket.title;
-                                font-family: Theme.serif;
-                                font-size: 19px;
-                                color: Theme.strength(bucket.key);
-                                vertical-alignment: center;
-                            }
-
-                            Rectangle { }
-
-                            // Two clicks to clear: the first arms it for 3 seconds. Hidden while
-                            // searching, since it clears every done task, not just the matches.
-                            if bucket.key == "done" && bucket.tasks.length > 0 && !root.filtering: Text {
-                                text: root.clear-armed ? "Clear " + bucket.tasks.length + "?" : "Clear";
-                                font-size: 12px;
-                                color: root.clear-armed ? Theme.accent : clear-ta.has-hover ? Theme.text : Theme.text-muted;
-                                vertical-alignment: center;
-                                clear-ta := TouchArea {
-                                    mouse-cursor: pointer;
-                                    clicked => {
-                                        if (root.clear-armed) {
-                                            root.clear-armed = false;
-                                            root.clear-done();
-                                        } else {
-                                            root.clear-armed = true;
-                                        }
-                                    }
-                                }
-                            }
-
-                            Text {
-                                text: bucket.tasks.length;
-                                font-size: 12px;
-                                color: Theme.text-muted;
-                                vertical-alignment: center;
-                            }
-
-                            VerticalLayout {
-                                alignment: center;
-                                Icon {
-                                    width: 12px;
-                                    height: 12px;
-                                    commands: bucket.collapsed ? "M 6 3.5 L 10.5 8 L 6 12.5" : "M 3.5 6 L 8 10.5 L 12.5 6";
-                                    stroke: header-ta.has-hover ? Theme.text : Theme.text-muted;
-                                }
-                            }
-                        }
-
-                        if root.dragging && root.drop-bucket == bucket.key && bucket.collapsed: Rectangle {
-                            x: 18px;
-                            y: parent.height - 3px;
-                            width: parent.width - 36px;
-                            height: 2px;
-                            background: Theme.accent;
-                        }
-                    }
-
-                    if !bucket.collapsed: VerticalLayout {
-                        for task[i] in bucket.tasks: TaskRow {
-                            task: task;
-                            bucket-key: bucket.key;
-                            index: i;
-                            drag-active: root.drag-in-list;
-                            drag-y: root.drag-y;
-                            lifted: root.drag-id == task.id;
-                            draggable: !root.filtering;
-                            profiles: root.profiles;
-                            sent(id, profile) => {
-                                root.send-task(id, profile);
-                            }
-                            drop-line: root.dragging && root.drop-bucket == bucket.key && root.drop-index == i;
-                            toggled(id) => {
-                                root.toggle-task(id);
-                            }
-                            deleted(id) => {
-                                root.delete-task(id);
-                            }
-                            moved(id, key) => {
-                                root.move-task(id, key, 0);
-                            }
-                            edit-live(id, is-desc, text) => {
-                                root.edit-live(id, is-desc, text);
-                            }
-                            edit-finished => {
-                                root.edit-finished();
-                            }
-                            edit-cancelled(id, title, desc) => {
-                                root.edit-cancelled(id, title, desc);
-                            }
-                            hover-drop(index) => {
-                                root.set-drop(bucket.key, index);
-                            }
-                            drag-start(id, title, gx, gy, w) => {
-                                root.drag-title = title;
-                                root.grab-x = gx;
-                                root.grab-y = gy;
-                                root.ghost-width = w;
-                                root.drop-bucket = "";
-                                root.drop-index = -1;
-                                root.drag-id = id;
-                            }
-                            drag-move(x, y) => {
-                                root.drag-x = x;
-                                root.drag-y = y;
-                            }
-                            drag-end => {
-                                if (root.drag-in-list && root.drop-bucket != "") {
-                                    root.move-task(root.drag-id, root.drop-bucket, root.drop-index);
-                                }
-                                root.drag-id = -1;
-                            }
-                            drag-cancelled => {
-                                root.drag-id = -1;
-                            }
-                        }
-
-                        DropZone {
-                            height: bucket.tasks.length == 0 ? 36px : 10px;
-                            drag-active: root.drag-in-list;
-                            drag-y: root.drag-y;
-                            drop-index: bucket.tasks.length;
-                            hover-drop(i) => {
-                                root.set-drop(bucket.key, i);
-                            }
-                            if bucket.tasks.length == 0: Text {
-                                x: 38px;
-                                y: 4px;
-                                text: bucket.empty-text;
-                                font-size: 12.5px;
-                                color: Theme.text-muted;
-                            }
-                            if root.dragging && root.drop-bucket == bucket.key && root.drop-index == bucket.tasks.length
-                                && bucket.tasks.length > 0: Rectangle {
-                                x: 8px;
-                                y: 0px;
-                                width: parent.width - 16px;
-                                height: 2px;
-                                background: Theme.accent;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // Status
-        Rectangle {
-            height: 36px;
-            Rectangle {
-                y: 0;
-                height: 1px;
-                background: Theme.hairline;
-            }
-
-            HorizontalLayout {
-                padding-left: 20px;
-                padding-right: 26px;
-                Text {
-                    text: root.status;
-                    font-size: 11.5px;
-                    color: status-ta.has-hover ? Theme.text : Theme.text-muted;
-                    vertical-alignment: center;
-                    // Opens Done and scrolls to it; Done is the last bucket, so that's the bottom.
-                    status-ta := TouchArea {
-                        enabled: root.has-done;
-                        mouse-cursor: root.has-done ? pointer : default;
-                        clicked => {
-                            root.show-done();
-                            root.revealing-done = true;
-                        }
-                    }
-                }
-
-                Rectangle { }
-
-                // Second click of deleting a profile; the first was in the profile menu.
-                if root.delete-armed: Text {
-                    text: "Delete " + root.profile-name + (root.profile-tasks == 0 ? "?" : root.profile-tasks == 1 ? " and its task?" : " and its " + root.profile-tasks + " tasks?");
-                    font-size: 11.5px;
-                    color: delete-ta.has-hover ? Theme.text : Theme.danger;
-                    vertical-alignment: center;
-                    delete-ta := TouchArea {
+                    TouchArea {
                         mouse-cursor: pointer;
                         clicked => {
-                            root.delete-armed = false;
-                            root.delete-profile();
-                        }
-                    }
-                }
-
-                if !root.offer-undo && !root.delete-armed: Text {
-                    text: "Alt+P shows and hides";
-                    font-size: 11.5px;
-                    color: Theme.text-muted;
-                    vertical-alignment: center;
-                }
-
-                if root.offer-undo && !root.delete-armed: Text {
-                    text: "Undo";
-                    font-size: 11.5px;
-                    color: undo-ta.has-hover ? Theme.text : Theme.accent;
-                    vertical-alignment: center;
-                    undo-ta := TouchArea {
-                        mouse-cursor: pointer;
-                        clicked => {
+                            root.offer-undo = false;
                             root.undo();
                         }
                     }
                 }
-            }
 
-            // Resize grip
-            Rectangle {
-                x: parent.width - 18px;
-                y: parent.height - 18px;
-                width: 16px;
-                height: 16px;
-                Icon {
-                    width: 10px;
-                    height: 10px;
-                    commands: "M 14 6 L 6 14 M 14 11 L 11 14";
-                    stroke: grip.has-hover ? Theme.text-muted : Theme.text-muted;
-                    stroke-width: 1.2px;
-                }
-                grip := TouchArea {
-                    mouse-cursor: nwse-resize;
-                    pointer-event(event) => {
-                        if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left) {
-                            root.start-resize();
+                // Resize grip
+                Rectangle {
+                    x: main.width - 32px;
+                    y: main.height - 32px;
+                    width: 32px;
+                    height: 32px;
+                    Icon {
+                        x: 18px;
+                        y: 18px;
+                        width: 10px;
+                        height: 10px;
+                        commands: "M 14 6 L 6 14 M 14 11 L 11 14";
+                        stroke: Theme.text-muted;
+                        stroke-width: 1.2px;
+                    }
+                    TouchArea {
+                        mouse-cursor: nwse-resize;
+                        pointer-event(event) => {
+                            if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left) {
+                                root.start-resize();
+                            }
                         }
                     }
                 }
@@ -694,103 +626,12 @@ export component AppWindow inherits Window {
         }
     }
 
-    Timer {
-        interval: 5s;
-        running: root.delete-armed;
-        triggered => {
-            root.delete-armed = false;
-        }
-    }
-
-    Timer {
-        interval: 30ms;
-        running: root.naming-next != 0;
-        triggered => {
-            root.name-profile(root.naming-next);
-            root.naming-next = 0;
-        }
-    }
-
-    profile-menu := PopupWindow {
-        x: 12px;
-        y: 42px;
-        width: 190px;
-        Rectangle {
-            background: Theme.card;
-            border-radius: 10px;
-            border-width: 1px;
-            border-color: Theme.hairline;
-            drop-shadow-blur: 18px;
-            drop-shadow-offset-y: 6px;
-            drop-shadow-color: #2E221B26;
-            VerticalLayout {
-                padding: 4px;
-                MenuLabel {
-                    text: "Profiles";
-                }
-                for p in root.profiles: MenuRow {
-                    label: p.name;
-                    detail: p.open > 0 ? p.open : "";
-                    dot: p.current ? Theme.accent : Theme.accent-soft;
-                    clicked => {
-                        root.delete-armed = false;
-                        root.select-profile(p.id);
-                    }
-                }
-                Rectangle {
-                    height: 9px;
-                    Rectangle {
-                        x: 8px;
-                        y: 4px;
-                        width: parent.width - 16px;
-                        height: 1px;
-                        background: Theme.hairline;
-                    }
-                }
-
-                MenuRow {
-                    label: "New profile";
-                    clicked => {
-                        root.naming-next = 1;
-                    }
-                }
-
-                MenuRow {
-                    label: "Rename " + root.profile-name;
-                    clicked => {
-                        root.naming-next = 2;
-                    }
-                }
-
-                if root.profiles.length > 1: MenuRow {
-                    label: "Delete " + root.profile-name;
-                    ink: Theme.danger;
-                    clicked => {
-                        root.delete-armed = true;
-                    }
-                }
-            }
-        }
-    }
-
     property <bool> clear-armed;
     Timer {
         interval: 3s;
         running: root.clear-armed;
         triggered => {
             root.clear-armed = false;
-        }
-    }
-
-    // Scroll to the bottom once the newly expanded Done rows are laid out; scrolling in the
-    // click handler itself would use the list's height from before they existed.
-    property <bool> revealing-done;
-    Timer {
-        interval: 30ms;
-        running: root.revealing-done;
-        triggered => {
-            root.revealing-done = false;
-            list.content-y = min(0px, list.height - list.content-height);
         }
     }
 
@@ -812,23 +653,23 @@ export component AppWindow inherits Window {
         x: root.drag-x - root.grab-x;
         y: root.drag-y - root.grab-y;
         width: root.ghost-width;
-        height: 38px;
-        border-radius: 8px;
+        height: 44px;
+        border-radius: 12px;
         background: Theme.card;
         border-width: 1px;
         border-color: Theme.accent-soft;
         drop-shadow-blur: 20px;
         drop-shadow-offset-y: 8px;
-        drop-shadow-color: #2E221B2E;
+        drop-shadow-color: #0000002E;
         HorizontalLayout {
-            padding-left: 10px;
+            padding-left: 12px;
             padding-right: 12px;
-            spacing: 10px;
+            spacing: 12px;
             Rectangle {
-                y: (parent.height - 18px) / 2;
-                width: 18px;
-                height: 18px;
-                border-radius: 9px;
+                y: (parent.height - 20px) / 2;
+                width: 20px;
+                height: 20px;
+                border-radius: 10px;
                 border-width: 1.5px;
                 border-color: Theme.accent;
             }
