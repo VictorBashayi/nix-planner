@@ -920,12 +920,12 @@ export component WidgetWindow inherits Window {
         root.reshape();
     }
 
-    // Resize grip, larger than the main window's so it is easy to catch.
+    // Resize grip
     Rectangle {
-        x: parent.width - 24px;
-        y: parent.height - 24px;
-        width: 24px;
-        height: 24px;
+        x: parent.width - 32px;
+        y: parent.height - 32px;
+        width: 32px;
+        height: 32px;
         Icon {
             width: 12px;
             height: 12px;
@@ -961,7 +961,7 @@ export component WidgetWindow inherits Window {
                     font-family: Theme.serif;
                     font-size: 16px;
                     dark-bg: root.dark-bg;
-                    ink: root.dark-bg ? #E8C9A6 : Theme.strength("now");
+                    ink: root.dark-bg ? Theme.accent-soft : Theme.strength("now");
                 }
 
                 InkText {
@@ -990,7 +990,7 @@ export component WidgetWindow inherits Window {
         // Rows are placed by hand rather than in a layout, so how many fit can follow the
         // window's height without the content's size feeding back into it.
         rows := Rectangle {
-            property <length> row-h: 27px;
+            property <length> row-h: 34px;
             property <int> shown: root.tasks.length * self.row-h <= self.height ? root.tasks.length
                 : max(0, floor((self.height - 18px) / self.row-h));
 
@@ -1002,13 +1002,23 @@ export component WidgetWindow inherits Window {
             }
             for t[i] in root.tasks: HorizontalLayout {
                 y: i * rows.row-h;
-                height: 18px;
+                height: 32px;
                 visible: i < rows.shown;
-                spacing: 10px;
-                Check {
-                    tint: root.dark-bg ? #FFFFFFc0 : Theme.text-muted;
-                    toggled => {
-                        root.toggle-task(t.id);
+                spacing: 6px;
+                // A 32 px target around the 20 px circle.
+                Rectangle {
+                    width: 32px;
+                    TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => {
+                            root.toggle-task(t.id);
+                        }
+                    }
+                    Check {
+                        tint: root.dark-bg ? #FFFFFFc0 : Theme.strength("now");
+                        toggled => {
+                            root.toggle-task(t.id);
+                        }
                     }
                 }
 
@@ -1025,7 +1035,7 @@ export component WidgetWindow inherits Window {
                     font-size: 11px;
                     dark-bg: root.dark-bg;
                     ink: t.overdue ? (root.dark-bg ? #F2A48F : Theme.danger)
-                        : t.soon ? (root.dark-bg ? #E8C9A6 : Theme.accent)
+                        : t.soon ? (root.dark-bg ? Theme.accent-soft : Theme.accent)
                         : (root.dark-bg ? #FFFFFF : Theme.text);
                     vertical-alignment: center;
                 }

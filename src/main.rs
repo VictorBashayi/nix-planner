@@ -144,7 +144,7 @@ impl App {
         let size = widget.window().size();
         let shape = [size.width as i32, size.height as i32, (widget.get_ink_height() * scale).ceil() as i32];
         if self.shape.replace(shape) != shape {
-            shape_widget(h, shape, (24.0 * scale).ceil() as i32);
+            shape_widget(h, shape, (32.0 * scale).ceil() as i32);
         }
     }
 
@@ -281,10 +281,11 @@ impl App {
             .and_then(|p| p.colour.as_deref())
             .and_then(theme::Rgb::parse)
             .unwrap_or_else(|| theme::Rgb::parse(theme::SWATCHES[0]).expect("swatches are valid"));
-        let t = theme::tokens(seed, self.dark.get());
-        push_theme(&self.ui().global::<Theme>(), &t);
+        push_theme(&self.ui().global::<Theme>(), &theme::tokens(seed, self.dark.get()));
+        // The widget sits on the wallpaper and picks its own ink from it, so it always
+        // takes the light set; only the profile colour carries over.
         if let Some(w) = self.widget.upgrade() {
-            push_theme(&w.global::<Theme>(), &t);
+            push_theme(&w.global::<Theme>(), &theme::tokens(seed, false));
         }
     }
 
