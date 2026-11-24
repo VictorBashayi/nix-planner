@@ -1,0 +1,245 @@
+import "fonts/YoungSerif-Regular.ttf";
+
+export struct TaskItem {
+    id: int,
+    title: string,
+    desc: string,
+    done: bool,
+    // "Completed today" for done tasks, "Due Sat 7 Nov" for open ones with a due date.
+    when: string,
+    overdue: bool,
+    // Within the hour before its due time.
+    soon: bool,
+}
+
+export struct BucketItem {
+    key: string,
+    title: string,
+    empty-text: string,
+    tasks: [TaskItem],
+}
+
+export struct ProfileItem {
+    id: int,
+    name: string,
+    // Open tasks in it.
+    open: int,
+    // All tasks in it, done ones included.
+    tasks: int,
+    current: bool,
+    colour: color,
+}
+
+export struct Swatch {
+    colour: color,
+    hex: string,
+}
+
+export struct SideBucket {
+    key: string,
+    title: string,
+    count: int,
+    current: bool,
+}
+
+export struct MoveOption {
+    key: string,
+    title: string,
+}
+
+// Colour roles, set from Rust (src/theme.rs) for the current profile and mode.
+// Each window has its own instance, so Rust sets both. Defaults: light coffee.
+export global Theme {
+    in-out property <color> chrome: #EFEDEB;
+    in-out property <color> canvas: #F5F2EF;
+    in-out property <color> card: #FCFAF9;
+    in-out property <color> card-alt: #EEE9E4;
+    in-out property <color> accent-soft: #F3DFCD;
+    in-out property <color> accent: #A2652F;
+    in-out property <color> text: #241C17;
+    in-out property <color> text-muted: #665C55;
+    in-out property <color> hairline: #DACFC6;
+    in-out property <color> hover: #FDFCFB;
+    in-out property <color> danger: #B4442F;
+    in-out property <color> now: #93582A;
+    in-out property <color> soon: #A2652F;
+    in-out property <color> later: #B07038;
+    in-out property <color> done: #A39E9A;
+    out property <string> serif: "Young Serif";
+
+    // The profile colour weakens the further away a bucket is in time.
+    public pure function strength(key: string) -> color {
+        if (key == "now") {
+            return self.now;
+        }
+        if (key == "soon") {
+            return self.soon;
+        }
+        if (key == "later") {
+            return self.later;
+        }
+        return self.done;
+    }
+}
+
+export component Icon inherits Path {
+    width: 16px;
+    height: 16px;
+    viewbox-width: 16;
+    viewbox-height: 16;
+    fill: transparent;
+    stroke-width: 1.5px;
+    stroke-line-cap: round;
+}
+
+export component IconButton inherits Rectangle {
+    in property <string> icon;
+    in property <bool> active;
+    in property <color> hover-tint: Theme.text;
+    out property <bool> hovered: ta.has-hover;
+    callback clicked;
+    width: 32px;
+    height: 32px;
+    border-radius: 16px;
+    background: ta.has-hover ? Theme.hover : transparent;
+    Icon {
+        commands: root.icon;
+        stroke: root.active ? Theme.accent : ta.has-hover ? root.hover-tint : Theme.text-muted;
+    }
+
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+export component Check inherits Rectangle {
+    in property <bool> done;
+    in property <color> tint;
+    callback toggled;
+    width: 20px;
+    height: 20px;
+    border-radius: 10px;
+    border-width: 1.5px;
+    border-color: root.done ? Theme.accent : ta.has-hover ? Theme.accent : root.tint;
+    background: root.done ? Theme.accent : ta.has-hover ? Theme.card-alt : transparent;
+    if root.done || ta.has-hover: Icon {
+        width: 10px;
+        height: 10px;
+        commands: "M 3.5 8.5 L 6.5 11.5 L 12.5 4.5";
+        stroke: root.done ? Theme.card : Theme.accent;
+        stroke-width: 2px;
+    }
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => {
+            root.toggled();
+        }
+    }
+}
+
+export component MenuRow inherits Rectangle {
+    in property <string> label;
+    in property <string> detail;
+    in property <color> dot: transparent;
+    in property <color> ink: Theme.text;
+    callback clicked;
+    height: 32px;
+    border-radius: 8px;
+    background: ta.has-hover ? Theme.hover : transparent;
+    HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 10px;
+        spacing: 9px;
+        Rectangle {
+            y: (parent.height - 8px) / 2;
+            width: 8px;
+            height: 8px;
+            border-radius: 4px;
+            background: root.dot;
+        }
+
+        Text {
+            text: root.label;
+            font-size: 12.5px;
+            color: root.ink;
+            vertical-alignment: center;
+            overflow: elide;
+            horizontal-stretch: 1;
+        }
+
+        Text {
+            text: root.detail;
+            font-size: 11.5px;
+            color: Theme.text-muted;
+            vertical-alignment: center;
+        }
+    }
+
+    ta := TouchArea {
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+export component MenuLabel inherits Text {
+    font-size: 11px;
+    color: Theme.text-muted;
+    height: 24px;
+    vertical-alignment: center;
+    x: 10px;
+}
+
+// A strip of a bucket that accepts drops at a fixed index.
+export component DropZone inherits Rectangle {
+    in property <bool> drag-active;
+    in property <length> drag-y;
+    in property <int> drop-index;
+    callback hover-drop(int);
+    property <bool> over: root.drag-active && root.drag-y >= self.absolute-position.y
+        && root.drag-y < self.absolute-position.y + self.height;
+    changed over => {
+        if (root.over) {
+            root.hover-drop(root.drop-index);
+        }
+    }
+}
+
+export component Chip inherits Rectangle {
+    in property <string> label;
+    in property <string> key;
+    in property <bool> selected;
+    callback clicked;
+    height: 26px;
+    border-radius: 13px;
+    background: root.selected ? Theme.card-alt : ta.has-hover ? Theme.hover : transparent;
+    HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 11px;
+        spacing: 7px;
+        Rectangle {
+            y: (parent.height - 7px) / 2;
+            width: 7px;
+            height: 7px;
+            border-radius: 3.5px;
+            background: Theme.strength(root.key);
+            opacity: root.selected ? 1 : 0.55;
+        }
+        Text {
+            text: root.label;
+            font-size: 12px;
+            vertical-alignment: center;
+            color: root.selected ? Theme.text : Theme.text-muted;
+        }
+    }
+
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => {
+            root.clicked();
+        }
+    }
+}

@@ -4,6 +4,7 @@ mod due;
 mod icon;
 mod notify;
 mod store;
+mod theme;
 
 use global_hotkey::hotkey::{Code, HotKey, Modifiers};
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
@@ -37,6 +38,8 @@ struct App {
     urgencies: RefCell<Vec<(u64, due::Urgency)>>,
     /// The widget's size and inked height when its click-through shape was last set.
     shape: Cell<[i32; 3]>,
+    /// Windows apps are in dark mode.
+    dark: Cell<bool>,
 }
 
 impl App {
@@ -141,7 +144,7 @@ impl App {
         let size = widget.window().size();
         let shape = [size.width as i32, size.height as i32, (widget.get_ink_height() * scale).ceil() as i32];
         if self.shape.replace(shape) != shape {
-            shape_widget(h, shape, (24.0 * scale).ceil() as i32);
+            shape_widget(h, shape, (32.0 * scale).ceil() as i32);
         }
     }
 
@@ -170,7 +173,9 @@ impl App {
         let (date, minute) = now_local();
         let query = self.query.borrow();
         let filtering = !query.is_empty();
-        let buckets: Vec<BucketItem> = Bucket::ALL
+        // One page, or while searching every bucket with matches.
+        let shown: Vec<Bucket> = if filtering { Bucket::ALL.to_vec() } else { vec![state.page] };
+        let buckets: Vec<BucketItem> = shown
             .into_iter()
             .filter_map(|b| {
                 let tasks: Vec<TaskItem> = state
@@ -201,20 +206,26 @@ impl App {
                 Some(BucketItem {
                     key: b.key().into(),
                     title: bucket_title(b).into(),
-                    collapsed: state.is_collapsed(b) && !filtering,
                     empty_text: empty_text(b).into(),
                     tasks: ModelRc::new(VecModel::from(tasks)),
                 })
             })
             .collect();
         ui.set_buckets(ModelRc::new(VecModel::from(buckets)));
-        ui.set_selected(match state.selected_bucket {
-            Bucket::Soon => 1,
-            Bucket::Later => 2,
-            _ => 0,
-        });
-        ui.set_status(status_text(state.counts()).into());
-        ui.set_has_done(state.counts().1 > 0);
+        ui.set_page(state.page.key().into());
+        let counts = side_counts(&state);
+        ui.set_side_buckets(ModelRc::new(VecModel::from(
+            Bucket::ALL
+                .into_iter()
+                .zip(counts)
+                .map(|(b, n)| SideBucket {
+                    key: b.key().into(),
+                    title: bucket_title(b).into(),
+                    count: n as i32,
+                    current: b == state.page,
+                })
+                .collect::<Vec<_>>(),
+        )));
         ui.set_profiles(ModelRc::new(VecModel::from(
             state
                 .profiles
@@ -223,12 +234,17 @@ impl App {
                     id: p.id as i32,
                     name: p.name.as_str().into(),
                     open: state.tasks.iter().filter(|t| t.profile == p.id && !t.completed).count() as i32,
+                    tasks: state.tasks.iter().filter(|t| t.profile == p.id).count() as i32,
                     current: p.id == state.profile,
+                    colour: p
+                        .colour
+                        .as_deref()
+                        .and_then(theme::Rgb::parse)
+                        .map(|c| slint::Color::from_rgb_u8(c.0, c.1, c.2))
+                        .unwrap_or_default(),
                 })
                 .collect::<Vec<_>>(),
         )));
-        ui.set_profile_name(state.profile_name(state.profile).into());
-        ui.set_profile_tasks(state.tasks.iter().filter(|t| t.profile == state.profile).count() as i32);
 
         // The widget shows today's open tasks, as many as fit its height.
         let w = self.widget.upgrade().expect("widget outlives app state");
@@ -250,8 +266,27 @@ impl App {
         w.set_profile(if state.profiles.len() > 1 { state.profile_name(state.profile).into() } else { SharedString::new() });
         *self.urgencies.borrow_mut() = urgencies(&state, date, minute);
         drop(state);
+        self.apply_theme();
         // The rows just changed, and so has the part of the widget that takes clicks.
         self.tend();
+    }
+
+    /// Colours both windows from the current profile's seed and the Windows mode.
+    fn apply_theme(&self) {
+        let state = self.state.borrow();
+        let seed = state
+            .profiles
+            .iter()
+            .find(|p| p.id == state.profile)
+            .and_then(|p| p.colour.as_deref())
+            .and_then(theme::Rgb::parse)
+            .unwrap_or_else(|| theme::Rgb::parse(theme::SWATCHES[0]).expect("swatches are valid"));
+        push_theme(&self.ui().global::<Theme>(), &theme::tokens(seed, self.dark.get()));
+        // The widget sits on the wallpaper and picks its own ink from it, so it always
+        // takes the light set; only the profile colour carries over.
+        if let Some(w) = self.widget.upgrade() {
+            push_theme(&w.global::<Theme>(), &theme::tokens(seed, false));
+        }
     }
 
     fn show(self: &Rc<Self>) {
@@ -301,6 +336,25 @@ impl App {
 }
 
 /// How urgent an open task's due date is; `None` for done tasks and tasks without one.
+fn push_theme(g: &Theme, t: &theme::Tokens) {
+    let c = |r: &theme::Rgb| slint::Color::from_rgb_u8(r.0, r.1, r.2);
+    g.set_chrome(c(&t.chrome));
+    g.set_canvas(c(&t.canvas));
+    g.set_card(c(&t.card));
+    g.set_card_alt(c(&t.card_alt));
+    g.set_accent_soft(c(&t.accent_soft));
+    g.set_accent(c(&t.accent));
+    g.set_text(c(&t.text));
+    g.set_text_muted(c(&t.text_muted));
+    g.set_hairline(c(&t.hairline));
+    g.set_hover(c(&t.hover));
+    g.set_danger(c(&t.danger));
+    g.set_now(c(&t.now));
+    g.set_soon(c(&t.soon));
+    g.set_later(c(&t.later));
+    g.set_done(c(&t.done));
+}
+
 fn urgency(t: &store::Task, today: due::Date, minute: u32) -> Option<due::Urgency> {
     t.due().filter(|_| !t.completed).map(|d| d.urgency(today, minute))
 }
@@ -320,20 +374,17 @@ fn bucket_title(b: Bucket) -> &'static str {
 
 fn empty_text(b: Bucket) -> &'static str {
     match b {
-        Bucket::Now => "Nothing for today yet.",
-        Bucket::Soon => "Nothing planned this week.",
-        Bucket::Later => "Ideas for someday go here.",
-        Bucket::Done => "Finished tasks land here.",
+        Bucket::Now => "Nothing for today",
+        Bucket::Soon => "Nothing this week",
+        Bucket::Later => "Nothing for someday",
+        Bucket::Done => "Nothing done yet",
     }
 }
 
-fn status_text((open, done): (usize, usize)) -> String {
-    match (open, done) {
-        (0, 0) => "No tasks yet".into(),
-        (o, 0) => format!("{o} open"),
-        (0, d) => format!("All done, {d} finished"),
-        (o, d) => format!("{o} open, {d} done"),
-    }
+/// Sidebar counts for the current profile: open tasks in Today, This week and
+/// Someday, then finished ones.
+fn side_counts(state: &State) -> [usize; 4] {
+    Bucket::ALL.map(|b| state.tasks_in(b).filter(|t| t.completed == (b == Bucket::Done)).count())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -647,7 +698,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         day: Cell::new(None),
         urgencies: RefCell::new(Vec::new()),
         shape: Cell::new([0; 3]),
+        dark: Cell::new(theme::system_dark()),
     });
+    ui.set_swatches(ModelRc::new(VecModel::from(
+        theme::SWATCHES
+            .iter()
+            .filter_map(|hex| {
+                let c = theme::Rgb::parse(hex)?;
+                Some(Swatch { colour: slint::Color::from_rgb_u8(c.0, c.1, c.2), hex: (*hex).into() })
+            })
+            .collect::<Vec<_>>(),
+    )));
     app.refresh();
 
     let on = |f: fn(&Rc<App>)| {
@@ -660,7 +721,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let (today, _) = now_local();
             let (title, due) = due::split(&text, today);
             let mut s = a.state.borrow_mut();
-            let b = s.selected_bucket;
+            let b = s.add_bucket();
             if let Some(id) = s.add(title, b) {
                 s.set_due(id, due, today);
             }
@@ -675,8 +736,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
     {
         let a = app.clone();
-        ui.on_select_bucket(move |i| {
-            a.state.borrow_mut().selected_bucket = [Bucket::Now, Bucket::Soon, Bucket::Later][i.clamp(0, 2) as usize];
+        ui.on_select_page(move |key| {
+            let Some(b) = Bucket::from_key(&key) else { return };
+            a.state.borrow_mut().set_page(b);
             a.refresh();
             a.schedule_save();
         });
@@ -733,15 +795,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             a.changed();
         });
     }
-    {
-        let a = app.clone();
-        ui.on_toggle_collapsed(move |key| {
-            if let Some(b) = Bucket::from_key(&key) {
-                a.state.borrow_mut().toggle_collapsed(b);
-                a.changed();
-            }
-        });
-    }
     ui.on_clear_done(on(|a| {
         a.state.borrow_mut().clear_done();
         a.changed();
@@ -774,16 +827,43 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     {
         let a = app.clone();
-        ui.on_rename_profile(move |name| {
-            a.state.borrow_mut().rename_profile(&name);
+        ui.on_rename_profile_id(move |id, name| {
+            a.state.borrow_mut().rename_profile_id(id as u32, &name);
             a.refresh();
             a.schedule_save();
         });
     }
-    ui.on_delete_profile(on(|a| {
-        a.state.borrow_mut().delete_profile();
-        a.switched();
-    }));
+    {
+        let a = app.clone();
+        // Undo restarts, so it can never bring back tasks of a profile that's gone.
+        ui.on_delete_profile_id(move |id| {
+            a.state.borrow_mut().delete_profile_id(id as u32);
+            a.switched();
+        });
+    }
+    {
+        let a = app.clone();
+        ui.on_set_profile_colour(move |id, hex| {
+            a.state.borrow_mut().set_profile_colour(id as u32, &hex);
+            a.refresh();
+            a.schedule_save();
+        });
+    }
+    {
+        let a = app.clone();
+        ui.on_drop_on_page(move |id, key| {
+            let Some(b) = Bucket::from_key(&key) else { return };
+            a.state.borrow_mut().move_to(id as u64, b, 0);
+            a.changed();
+        });
+    }
+    {
+        let a = app.clone();
+        ui.on_drop_on_profile(move |id, profile| {
+            a.state.borrow_mut().send_to(id as u64, profile as u32);
+            a.changed();
+        });
+    }
     {
         let a = app.clone();
         ui.on_send_task(move |id, profile| {
@@ -793,10 +873,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     ui.on_undo(on(|a| a.step_history(false)));
     ui.on_redo(on(|a| a.step_history(true)));
-    ui.on_show_done(on(|a| {
-        a.state.borrow_mut().expand(Bucket::Done);
-        a.changed();
-    }));
     ui.on_hide_window(on(|a| a.hide()));
     {
         let w = ui.as_weak();
@@ -952,6 +1028,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let w = widget.as_weak();
         let a = app.clone();
         move || {
+            let dark = theme::system_dark();
+            if dark != a.dark.get() {
+                a.dark.set(dark);
+                a.apply_theme();
+            }
             a.check_clock();
             a.tend();
             a.remember_widget();
@@ -988,6 +1069,19 @@ mod tests {
 
     fn day(year: u16, month: u16, day: u16, weekday: u16) -> Day {
         Day { year, month, day, weekday }
+    }
+
+    #[test]
+    fn sidebar_counts_follow_the_current_profile() {
+        let mut s = State::default();
+        s.add("a", Bucket::Now);
+        s.add("b", Bucket::Later);
+        let id = s.add("c", Bucket::Soon).unwrap();
+        s.toggle(id);
+        s.profile = 1;
+        s.add("other", Bucket::Now);
+        s.profile = 0;
+        assert_eq!(side_counts(&s), [1, 0, 1, 1]);
     }
 
     #[test]

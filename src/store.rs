@@ -78,13 +78,19 @@ pub struct Task {
 pub struct Profile {
     pub id: u32,
     pub name: String,
+    /// Seed colour as "#RRGGBB"; assigned from `theme::SWATCHES` when missing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub colour: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(rename_all = "camelCase", default)]
 pub struct State {
     pub tasks: Vec<Task>,
+    /// Where new tasks go in older builds; never Done, so it mirrors `page` only for open buckets.
     pub selected_bucket: Bucket,
+    /// The bucket page on show.
+    pub page: Bucket,
     pub collapsed: BTreeMap<String, bool>,
     pub next_id: u64,
     /// Desktop widget placement in physical pixels: x, y, width, height.
@@ -100,6 +106,7 @@ impl Default for State {
         State {
             tasks: Vec::new(),
             selected_bucket: Bucket::Now,
+            page: Bucket::Now,
             collapsed: BTreeMap::from([("done".to_string(), true)]),
             next_id: 1,
             widget: None,
@@ -107,7 +114,11 @@ impl Default for State {
             profiles: ["Personal", "Work", "School"]
                 .iter()
                 .zip(0..)
-                .map(|(name, id)| Profile { id, name: name.to_string() })
+                .map(|(name, id)| Profile {
+                    id,
+                    name: name.to_string(),
+                    colour: Some(crate::theme::SWATCHES[id as usize].to_string()),
+                })
                 .collect(),
             profile: 0,
         }
@@ -163,29 +174,52 @@ impl State {
     pub fn add_profile(&mut self, name: &str) -> bool {
         let Some(name) = profile_name(name) else { return false };
         let id = self.profiles.iter().map(|p| p.id + 1).max().unwrap_or(0);
-        self.profiles.push(Profile { id, name });
+        self.profiles.push(Profile { id, name, colour: None });
         self.profile = id;
+        self.heal();
         true
     }
 
-    /// Renames the current profile; a blank name changes nothing.
-    pub fn rename_profile(&mut self, name: &str) {
-        let current = self.profile;
-        if let (Some(name), Some(p)) = (profile_name(name), self.profiles.iter_mut().find(|p| p.id == current)) {
+    /// Shows a bucket page. Done leaves `selected_bucket` alone, so an older build
+    /// reading the file never adds tasks straight into Done.
+    pub fn set_page(&mut self, b: Bucket) {
+        self.page = b;
+        if b != Bucket::Done {
+            self.selected_bucket = b;
+        }
+    }
+
+    /// Where the add box puts new tasks: the page on show. Done has no add box, so it
+    /// falls back to the last open page.
+    pub fn add_bucket(&self) -> Bucket {
+        if self.page == Bucket::Done { self.selected_bucket } else { self.page }
+    }
+
+    /// Sets a profile's seed colour; unknown ids are ignored.
+    pub fn set_profile_colour(&mut self, id: u32, hex: &str) {
+        if let Some(p) = self.profiles.iter_mut().find(|p| p.id == id) {
+            p.colour = Some(hex.to_string());
+        }
+    }
+
+    /// Renames a profile; a blank name or unknown id changes nothing.
+    pub fn rename_profile_id(&mut self, id: u32, name: &str) {
+        if let (Some(name), Some(p)) = (profile_name(name), self.profiles.iter_mut().find(|p| p.id == id)) {
             p.name = name;
         }
     }
 
-    /// Deletes the current profile with all its tasks and shows the first one left.
-    /// The last profile can't be deleted.
-    pub fn delete_profile(&mut self) {
-        if self.profiles.len() < 2 {
+    /// Deletes a profile with all its tasks. Deleting the one on show shows the first
+    /// one left. The last profile can't be deleted.
+    pub fn delete_profile_id(&mut self, id: u32) {
+        if self.profiles.len() < 2 || !self.profiles.iter().any(|p| p.id == id) {
             return;
         }
-        let gone = self.profile;
-        self.profiles.retain(|p| p.id != gone);
-        self.tasks.retain(|t| t.profile != gone);
-        self.profile = self.profiles[0].id;
+        self.profiles.retain(|p| p.id != id);
+        self.tasks.retain(|t| t.profile != id);
+        if self.profile == id {
+            self.profile = self.profiles[0].id;
+        }
     }
 
     /// Moves a task to the top of the same bucket in another profile.
@@ -215,19 +249,18 @@ impl State {
                 t.profile = first;
             }
         }
-    }
-
-    pub fn is_collapsed(&self, bucket: Bucket) -> bool {
-        self.collapsed.get(bucket.key()).copied().unwrap_or(false)
-    }
-
-    pub fn toggle_collapsed(&mut self, bucket: Bucket) {
-        let c = !self.is_collapsed(bucket);
-        self.collapsed.insert(bucket.key().to_string(), c);
-    }
-
-    pub fn expand(&mut self, bucket: Bucket) {
-        self.collapsed.insert(bucket.key().to_string(), false);
+        // Give each uncoloured profile the first swatch nobody uses, so colours stay put.
+        for i in 0..self.profiles.len() {
+            if self.profiles[i].colour.is_some() {
+                continue;
+            }
+            let swatches = crate::theme::SWATCHES;
+            let free = swatches
+                .iter()
+                .find(|c| !self.profiles.iter().any(|p| p.colour.as_deref() == Some(**c)))
+                .unwrap_or(&swatches[i % swatches.len()]);
+            self.profiles[i].colour = Some(free.to_string());
+        }
     }
 
     fn find_mut(&mut self, id: u64) -> Option<&mut Task> {
@@ -260,9 +293,6 @@ impl State {
             },
         );
         self.move_to(id, bucket, 0);
-        if bucket != Bucket::Done {
-            self.collapsed.insert(bucket.key().to_string(), false);
-        }
         Some(id)
     }
 
@@ -419,13 +449,6 @@ impl State {
         }
         self.tasks.retain(|t| !t.text.is_empty());
     }
-
-    /// Open and done task counts for the current profile.
-    pub fn counts(&self) -> (usize, usize) {
-        let all = self.tasks.iter().filter(|t| t.profile == self.profile);
-        let done = all.clone().filter(|t| t.completed).count();
-        (all.count() - done, done)
-    }
 }
 
 /// Undo and redo for the task list, kept as whole-list snapshots. Only the tasks
@@ -528,24 +551,6 @@ mod tests {
         s.add("b", Bucket::Now);
         assert_eq!(ids(&s, Bucket::Now), vec![2, 1]);
         assert_eq!(s.tasks[0].text, "b");
-    }
-
-    #[test]
-    fn add_uncollapses_target_bucket() {
-        let mut s = State::default();
-        s.toggle_collapsed(Bucket::Soon);
-        s.add("x", Bucket::Soon);
-        assert!(!s.is_collapsed(Bucket::Soon));
-    }
-
-    #[test]
-    fn expand_opens_a_collapsed_bucket_and_keeps_an_open_one_open() {
-        let mut s = State::default();
-        assert!(s.is_collapsed(Bucket::Done));
-        s.expand(Bucket::Done);
-        assert!(!s.is_collapsed(Bucket::Done));
-        s.expand(Bucket::Done);
-        assert!(!s.is_collapsed(Bucket::Done));
     }
 
     #[test]
@@ -689,7 +694,7 @@ mod tests {
         s.move_to(4, Bucket::Now, 2);
         assert_eq!(ids(&s, Bucket::Now), vec![3, 4]);
         s.toggle(3);
-        assert_eq!(s.counts(), (1, 1));
+        assert_eq!((ids(&s, Bucket::Now).len(), ids(&s, Bucket::Done).len()), (1, 1));
 
         s.select_profile(0);
         s.select_profile(99);
@@ -697,16 +702,16 @@ mod tests {
         assert_eq!(s.clear_done(), 0, "Gym's done task is not Personal's to clear");
         s.send_to(1, gym);
         assert_eq!(ids(&s, Bucket::Now), vec![2]);
-        s.rename_profile("Home");
+        s.rename_profile_id(s.profile, "Home");
         assert_eq!(s.profile_name(0), "Home");
 
         s.select_profile(gym);
         assert_eq!(ids(&s, Bucket::Now), vec![1, 4]);
-        s.delete_profile();
+        s.delete_profile_id(s.profile);
         assert_eq!(s.tasks.iter().map(|t| t.id).collect::<Vec<_>>(), vec![2]);
         assert_eq!(s.profile, 0);
         for _ in 0..3 {
-            s.delete_profile();
+            s.delete_profile_id(s.profile);
         }
         assert_eq!(s.profiles.len(), 1, "the last profile stays");
         s.next_profile();
@@ -809,7 +814,8 @@ mod tests {
         assert_eq!(s.tasks.len(), 2);
         assert_eq!(s.selected_bucket, Bucket::Later);
         assert_eq!(s.tasks[1].previous_bucket, Some(Bucket::Now));
-        assert!(s.is_collapsed(Bucket::Done));
+        // Kept in the file for older builds, though the UI no longer collapses buckets.
+        assert_eq!(s.collapsed.get("done"), Some(&true));
         assert_eq!(s.next_id, 6);
         // A file from before profiles: everything is in the first profile.
         assert_eq!((s.profile, s.profile_name(0)), (0, "Personal"));
@@ -823,6 +829,8 @@ mod tests {
         let mut s = state_with(2, Bucket::Now);
         s.toggle(1);
         s.widget = Some([-1200, 40, 300, 220]);
+        s.set_page(Bucket::Done);
+        s.set_profile_colour(1, "#4E8A5A");
         save(&path, &s).unwrap();
         assert_eq!(load(&path), s);
         std::fs::remove_dir_all(dir).ok();
@@ -838,5 +846,76 @@ mod tests {
         let backups = std::fs::read_dir(&dir).unwrap().count();
         assert_eq!(backups, 2);
         std::fs::remove_dir_all(dir).ok();
+    }
+    #[test]
+    fn page_done_keeps_selected_bucket_open() {
+        let mut s = State::default();
+        s.set_page(Bucket::Soon);
+        assert_eq!((s.page, s.selected_bucket), (Bucket::Soon, Bucket::Soon));
+        s.set_page(Bucket::Done);
+        assert_eq!((s.page, s.selected_bucket), (Bucket::Done, Bucket::Soon));
+        let json = serde_json::to_string(&s).unwrap();
+        assert!(json.contains("\"page\":\"done\"") && json.contains("\"selectedBucket\":\"soon\""));
+    }
+
+    #[test]
+    fn delete_other_profile_keeps_current() {
+        let mut s = State::default();
+        s.profile = 1;
+        s.add("work task", Bucket::Now);
+        s.profile = 0;
+        s.add("home task", Bucket::Now);
+        s.delete_profile_id(1);
+        assert_eq!(s.profile, 0);
+        assert_eq!(s.profiles.iter().map(|p| p.id).collect::<Vec<_>>(), vec![0, 2]);
+        assert!(s.tasks.iter().all(|t| t.profile == 0));
+    }
+
+    #[test]
+    fn colours_assigned_once_and_kept() {
+        let mut s: State = serde_json::from_str(
+            r#"{"profiles":[{"id":0,"name":"A"},{"id":1,"name":"B"},{"id":2,"name":"C"}]}"#,
+        )
+        .unwrap();
+        s.heal();
+        let before: Vec<String> = s.profiles.iter().map(|p| p.colour.clone().unwrap()).collect();
+        assert_eq!(before[0], crate::theme::SWATCHES[0]);
+        s.delete_profile_id(0);
+        s.heal();
+        let after: Vec<String> = s.profiles.iter().map(|p| p.colour.clone().unwrap()).collect();
+        assert_eq!(after, before[1..]);
+    }
+
+    #[test]
+    fn dropping_a_done_task_on_someday_reopens_it_on_top() {
+        let mut s = State::default();
+        s.add("x", Bucket::Later);
+        let id = s.add("y", Bucket::Now).unwrap();
+        s.toggle(id);
+        s.move_to(id, Bucket::Later, 0);
+        let t = s.tasks.iter().find(|t| t.id == id).unwrap();
+        assert!(!t.completed && t.completed_at.is_none());
+        assert_eq!(s.tasks_in(Bucket::Later).next().unwrap().id, id);
+    }
+
+    #[test]
+    fn add_goes_to_the_page_shown_even_from_an_older_file() {
+        // Older builds saved the chip choice but no page; the page shown is then Today.
+        let s: State = serde_json::from_str(r#"{"selectedBucket":"soon"}"#).unwrap();
+        assert_eq!(s.page, Bucket::Now);
+        assert_eq!(s.add_bucket(), Bucket::Now);
+        let mut s = State::default();
+        s.set_page(Bucket::Later);
+        s.set_page(Bucket::Done);
+        assert_eq!(s.add_bucket(), Bucket::Later, "Done has no add box; fall back to the last open page");
+    }
+
+    #[test]
+    fn rename_and_colour_by_id() {
+        let mut s = State::default();
+        s.rename_profile_id(2, "  Uni  ");
+        s.set_profile_colour(2, "#4F6FA8");
+        let p = s.profiles.iter().find(|p| p.id == 2).unwrap();
+        assert_eq!((p.name.as_str(), p.colour.as_deref()), ("Uni", Some("#4F6FA8")));
     }
 }
