@@ -721,7 +721,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let (today, _) = now_local();
             let (title, due) = due::split(&text, today);
             let mut s = a.state.borrow_mut();
-            let b = s.selected_bucket;
+            let b = s.add_bucket();
             if let Some(id) = s.add(title, b) {
                 s.set_due(id, due, today);
             }

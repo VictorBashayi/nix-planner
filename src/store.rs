@@ -189,6 +189,12 @@ impl State {
         }
     }
 
+    /// Where the add box puts new tasks: the page on show. Done has no add box, so it
+    /// falls back to the last open page.
+    pub fn add_bucket(&self) -> Bucket {
+        if self.page == Bucket::Done { self.selected_bucket } else { self.page }
+    }
+
     /// Sets a profile's seed colour; unknown ids are ignored.
     pub fn set_profile_colour(&mut self, id: u32, hex: &str) {
         if let Some(p) = self.profiles.iter_mut().find(|p| p.id == id) {
@@ -890,6 +896,18 @@ mod tests {
         let t = s.tasks.iter().find(|t| t.id == id).unwrap();
         assert!(!t.completed && t.completed_at.is_none());
         assert_eq!(s.tasks_in(Bucket::Later).next().unwrap().id, id);
+    }
+
+    #[test]
+    fn add_goes_to_the_page_shown_even_from_an_older_file() {
+        // Older builds saved the chip choice but no page; the page shown is then Today.
+        let s: State = serde_json::from_str(r#"{"selectedBucket":"soon"}"#).unwrap();
+        assert_eq!(s.page, Bucket::Now);
+        assert_eq!(s.add_bucket(), Bucket::Now);
+        let mut s = State::default();
+        s.set_page(Bucket::Later);
+        s.set_page(Bucket::Done);
+        assert_eq!(s.add_bucket(), Bucket::Later, "Done has no add box; fall back to the last open page");
     }
 
     #[test]
