@@ -461,6 +461,9 @@ export component AppWindow inherits Window {
                                                 edit-cancelled(id, title, desc) => {
                                                     root.edit-cancelled(id, title, desc);
                                                 }
+                                                released-focus => {
+                                                    root.focus-input();
+                                                }
                                                 hover-drop(index) => {
                                                     root.set-drop(bucket.key, index);
                                                 }

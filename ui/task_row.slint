@@ -47,6 +47,8 @@ export component TaskRow inherits Rectangle {
     callback edit-live(int, bool, string);
     callback edit-finished();
     callback edit-cancelled(int, string, string);
+    // Editing ended by Enter or Esc, so keyboard focus should go back to the window.
+    callback released-focus();
     callback drag-start(int, string, length, length, length);
     callback drag-move(length, length);
     callback drag-end();
@@ -70,7 +72,25 @@ export component TaskRow inherits Rectangle {
         }
     }
 
-    border-radius: 8px;
+    function open-desc() {
+        root.editing-desc = true;
+        desc-editor.focus();
+        desc-editor.set-selection-offsets(2147483647, 2147483647);
+    }
+
+    // "Add note" is picked in the menu, which hands focus back as it closes.
+    property <bool> add-note-pending;
+    Timer {
+        interval: 30ms;
+        running: root.add-note-pending;
+        triggered => {
+            root.add-note-pending = false;
+            root.open-desc();
+        }
+    }
+
+    min-height: 44px;
+    border-radius: 12px;
     background: root.active && !root.lifted ? Theme.hover : transparent;
     opacity: root.lifted ? 0.35 : 1;
 
@@ -102,26 +122,32 @@ export component TaskRow inherits Rectangle {
                 return;
             }
             if (self.mouse-y > 8px + title-slot.y + title-slot.height && root.task.desc != "") {
-                root.editing-desc = true;
-                desc-editor.focus();
+                root.open-desc();
             } else {
                 root.editing-title = true;
                 title-editor.focus();
+                // Caret after the last character; offsets past the end are clamped.
+                title-editor.set-selection-offsets(2147483647, 2147483647);
             }
         }
     }
 
     HorizontalLayout {
-        padding-left: 10px;
+        padding-left: 2px;
         padding-right: 6px;
-        padding-top: 8px;
-        padding-bottom: 8px;
-        spacing: 10px;
+        spacing: 8px;
 
-        VerticalLayout {
-            alignment: start;
-            padding-top: 1px;
+        // The whole left gutter checks the task, not just the circle.
+        Rectangle {
+            width: 40px;
+            gutter-ta := TouchArea {
+                mouse-cursor: pointer;
+                clicked => {
+                    root.toggled(root.task.id);
+                }
+            }
             Check {
+                y: 12px;
                 done: root.task.done;
                 tint: Theme.strength(root.bucket-key);
                 toggled => {
@@ -132,6 +158,8 @@ export component TaskRow inherits Rectangle {
 
         VerticalLayout {
             horizontal-stretch: 1;
+            padding-top: 11px;
+            padding-bottom: 11px;
             spacing: 2px;
             alignment: center;
 
@@ -157,17 +185,18 @@ export component TaskRow inherits Rectangle {
                     }
                     enter-pressed => {
                         if (root.task.desc == "") {
-                            root.editing-desc = true;
-                            desc-editor.focus();
+                            root.open-desc();
                             root.editing-title = false;
                         } else {
                             root.editing-title = false;
                             root.edit-finished();
+                            root.released-focus();
                         }
                     }
                     cancelled => {
                         root.editing-title = false;
                         root.edit-cancelled(root.task.id, root.task.title, root.task.desc);
+                        root.released-focus();
                     }
                     finished => {
                         if (root.editing-title) {
@@ -199,10 +228,12 @@ export component TaskRow inherits Rectangle {
                 enter-pressed => {
                     root.editing-desc = false;
                     root.edit-finished();
+                    root.released-focus();
                 }
                 cancelled => {
                     root.editing-desc = false;
                     root.edit-cancelled(root.task.id, root.task.title, root.task.desc);
+                    root.released-focus();
                 }
                 finished => {
                     if (root.editing-desc) {
@@ -211,6 +242,9 @@ export component TaskRow inherits Rectangle {
                     }
                 }
                 if self.text == "" && root.editing-desc: Text {
+                    x: 0px;
+                    width: parent.width;
+                    horizontal-alignment: left;
                     text: "Add a note";
                     font-size: 12px;
                     color: Theme.text-muted;
@@ -229,6 +263,7 @@ export component TaskRow inherits Rectangle {
             // Keeps the buttons at the row's right edge, however short the title.
             horizontal-stretch: 0;
             alignment: start;
+            padding-top: 6px;
             spacing: 0px;
             opacity: root.active && !root.lifted ? 1 : 0;
             move-btn := IconButton {
@@ -257,9 +292,9 @@ export component TaskRow inherits Rectangle {
     }
 
     menu := PopupWindow {
-        x: root.width - 150px;
-        y: 36px;
-        width: 140px;
+        x: root.width - 170px;
+        y: 40px;
+        width: 160px;
         Rectangle {
             background: Theme.card;
             border-radius: 10px;
@@ -270,6 +305,12 @@ export component TaskRow inherits Rectangle {
             drop-shadow-color: #2E221B26;
             VerticalLayout {
                 padding: 4px;
+                if root.task.desc == "": MenuRow {
+                    label: "Add note";
+                    clicked => {
+                        root.add-note-pending = true;
+                    }
+                }
                 MenuLabel {
                     text: "Move to";
                 }
