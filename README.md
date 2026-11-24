@@ -11,7 +11,7 @@ One native `.exe`. No browser engine, no runtime, no installer.
 [![License: MIT](https://img.shields.io/badge/license-MIT-4E8A5A)](LICENSE)
 ![Built with Rust and Slint](https://img.shields.io/badge/built%20with-Rust%20%2B%20Slint-B0703A)
 
-<img src="docs/screenshots/work-today.png" alt="Nix Planner showing the Today page of the Work profile" width="540">
+<img src="docs/screenshots/work-today.png" alt="Nix Planner showing the Today page of the Work profile" width="596">
 
 </div>
 
@@ -20,9 +20,9 @@ out of the way. It is written in Rust with [Slint](https://slint.dev) and render
 so it idles at about 0% CPU and uses roughly 5 MB of private memory.
 
 <p align="center">
-  <img src="docs/screenshots/personal-week.png" alt="The This week page of the Personal profile, tinted brown" width="400">
+  <img src="docs/screenshots/personal-week.png" alt="The This week page of the Personal profile, tinted brown" width="380">
   &nbsp;
-  <img src="docs/screenshots/school-today.png" alt="The Today page of the School profile, tinted green" width="400">
+  <img src="docs/screenshots/school-today.png" alt="The Today page of the School profile, tinted green" width="380">
   <br>
   <sub>Each profile has its own colour, which tints the whole window.</sub>
 </p>
@@ -56,6 +56,10 @@ when you sign in, put a shortcut to it in your Startup folder (`Win+R`, then `sh
 ### Desktop widget
 
 A transparent card on the desktop shows today's open tasks for the profile on show. Tick one to complete it.
+
+<p align="center">
+  <img src="docs/screenshots/widget.png" alt="The desktop widget listing today's tasks over a dark wallpaper" width="496">
+</p>
 
 - Win+D (Show desktop) leaves it in place.
 - It stays below your other windows and out of Alt+Tab, and Windows can't snap or maximise it.
