@@ -196,21 +196,11 @@ impl State {
         }
     }
 
-    /// Renames the current profile; a blank name changes nothing.
-    pub fn rename_profile(&mut self, name: &str) {
-        self.rename_profile_id(self.profile, name);
-    }
-
     /// Renames a profile; a blank name or unknown id changes nothing.
     pub fn rename_profile_id(&mut self, id: u32, name: &str) {
         if let (Some(name), Some(p)) = (profile_name(name), self.profiles.iter_mut().find(|p| p.id == id)) {
             p.name = name;
         }
-    }
-
-    /// Deletes the current profile with all its tasks and shows the first one left.
-    pub fn delete_profile(&mut self) {
-        self.delete_profile_id(self.profile);
     }
 
     /// Deletes a profile with all its tasks. Deleting the one on show shows the first
@@ -706,16 +696,16 @@ mod tests {
         assert_eq!(s.clear_done(), 0, "Gym's done task is not Personal's to clear");
         s.send_to(1, gym);
         assert_eq!(ids(&s, Bucket::Now), vec![2]);
-        s.rename_profile("Home");
+        s.rename_profile_id(s.profile, "Home");
         assert_eq!(s.profile_name(0), "Home");
 
         s.select_profile(gym);
         assert_eq!(ids(&s, Bucket::Now), vec![1, 4]);
-        s.delete_profile();
+        s.delete_profile_id(s.profile);
         assert_eq!(s.tasks.iter().map(|t| t.id).collect::<Vec<_>>(), vec![2]);
         assert_eq!(s.profile, 0);
         for _ in 0..3 {
-            s.delete_profile();
+            s.delete_profile_id(s.profile);
         }
         assert_eq!(s.profiles.len(), 1, "the last profile stays");
         s.next_profile();
@@ -888,6 +878,18 @@ mod tests {
         s.heal();
         let after: Vec<String> = s.profiles.iter().map(|p| p.colour.clone().unwrap()).collect();
         assert_eq!(after, before[1..]);
+    }
+
+    #[test]
+    fn dropping_a_done_task_on_someday_reopens_it_on_top() {
+        let mut s = State::default();
+        s.add("x", Bucket::Later);
+        let id = s.add("y", Bucket::Now).unwrap();
+        s.toggle(id);
+        s.move_to(id, Bucket::Later, 0);
+        let t = s.tasks.iter().find(|t| t.id == id).unwrap();
+        assert!(!t.completed && t.completed_at.is_none());
+        assert_eq!(s.tasks_in(Bucket::Later).next().unwrap().id, id);
     }
 
     #[test]

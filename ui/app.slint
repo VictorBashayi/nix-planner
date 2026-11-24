@@ -1,7 +1,7 @@
-import { Theme, TaskItem, BucketItem, ProfileItem, SideBucket, MoveOption, Icon, IconButton, Check, MenuRow, MenuLabel, DropZone, Chip } from "theme.slint";
+import { Theme, TaskItem, BucketItem, ProfileItem, SideBucket, Swatch, MoveOption, Icon, IconButton, Check, MenuRow, MenuLabel, DropZone, Chip } from "theme.slint";
 import { TaskRow, Editor } from "task_row.slint";
 import { Sidebar, BucketIcons } from "sidebar.slint";
-export { Theme, TaskItem, BucketItem, ProfileItem, SideBucket }
+export { Theme, TaskItem, BucketItem, ProfileItem, SideBucket, Swatch }
 
 export component AppWindow inherits Window {
     title: "Nix Planner";
@@ -29,10 +29,15 @@ export component AppWindow inherits Window {
     callback select-profile(int);
     callback next-profile();
     callback add-profile(string);
-    callback rename-profile(string);
-    // Deletes the current profile and its tasks.
-    callback delete-profile();
+    callback rename-profile-id(int, string);
+    // Deletes a profile and its tasks.
+    callback delete-profile-id(int);
+    callback set-profile-colour(int, string);
+    in property <[Swatch]> swatches;
     callback send-task(int, int);
+    // A task dropped on a sidebar bucket (task id, bucket key) or profile (task id, profile id).
+    callback drop-on-page(int, string);
+    callback drop-on-profile(int, int);
     // Asks Rust to pin and shape the widget again after it was re-shown.
     callback tend-requested();
 
@@ -71,7 +76,15 @@ export component AppWindow inherits Window {
     property <string> drop-bucket;
     property <int> drop-index: -1;
     property <length> list-top: list.absolute-position.y;
-    property <bool> drag-in-list: root.dragging && root.drag-y >= root.list-top && root.drag-y < root.list-top + list.height;
+    property <bool> drag-in-list: root.dragging && root.drag-x >= main.absolute-position.x
+        && root.drag-y >= root.list-top && root.drag-y < root.list-top + list.height;
+
+    // The profile whose menu is open, where it opened, and its two-step states.
+    property <ProfileItem> menu-profile;
+    property <length> menu-x;
+    property <length> menu-y;
+    property <bool> menu-renaming;
+    property <bool> menu-delete-armed;
 
     // The add box and the search box share a slot; Ctrl+F swaps them.
     property <bool> searching;
@@ -110,6 +123,15 @@ export component AppWindow inherits Window {
         root.clear-armed = false;
         root.select-page(key);
         root.focus-input();
+    }
+
+    function open-profile-menu(p: ProfileItem, x: length, y: length) {
+        root.menu-profile = p;
+        root.menu-x = x;
+        root.menu-y = y;
+        root.menu-renaming = false;
+        root.menu-delete-armed = false;
+        profile-menu.show();
     }
 
     function set-drop(key: string, index: int) {
@@ -175,9 +197,15 @@ export component AppWindow inherits Window {
         }
 
         HorizontalLayout {
-            Sidebar {
+            side := Sidebar {
                 profiles: root.profiles;
                 buckets: root.side-buckets;
+                drag-active: root.dragging;
+                drag-x: root.drag-x;
+                drag-y: root.drag-y;
+                profile-menu(p, x, y) => {
+                    root.open-profile-menu(p, x, y);
+                }
                 select-profile(id) => {
                     root.select-profile(id);
                     root.focus-input();
@@ -450,12 +478,20 @@ export component AppWindow inherits Window {
                                                     root.drag-y = y;
                                                 }
                                                 drag-end => {
-                                                    if (root.drag-in-list && root.drop-bucket != "") {
+                                                    if (side.drop-page != "") {
+                                                        root.drop-on-page(root.drag-id, side.drop-page);
+                                                    } else if (side.drop-profile >= 0) {
+                                                        root.drop-on-profile(root.drag-id, side.drop-profile);
+                                                    } else if (root.drag-in-list && root.drop-bucket != "") {
                                                         root.move-task(root.drag-id, root.drop-bucket, root.drop-index);
                                                     }
+                                                    side.drop-page = "";
+                                                    side.drop-profile = -1;
                                                     root.drag-id = -1;
                                                 }
                                                 drag-cancelled => {
+                                                    side.drop-page = "";
+                                                    side.drop-profile = -1;
                                                     root.drag-id = -1;
                                                 }
                                             }
@@ -644,6 +680,136 @@ export component AppWindow inherits Window {
                 list.content-y = min(0px, list.content-y + 7px);
             } else {
                 list.content-y = max(min(0px, list.height - list.content-height), list.content-y - 7px);
+            }
+        }
+    }
+
+    Timer {
+        interval: 5s;
+        running: root.menu-delete-armed;
+        triggered => {
+            root.menu-delete-armed = false;
+        }
+    }
+
+    // The menu hands focus back as it opens a text box, so focus it a moment later.
+    property <bool> rename-focus-pending;
+
+    profile-menu := PopupWindow {
+        x: min(root.menu-x, root.width - 288px);
+        y: min(root.menu-y, root.height - 200px);
+        width: 280px;
+        close-policy: close-on-click-outside;
+        Rectangle {
+            background: Theme.card;
+            border-radius: 12px;
+            border-width: 1px;
+            border-color: Theme.hairline;
+            drop-shadow-blur: 18px;
+            drop-shadow-offset-y: 6px;
+            drop-shadow-color: #00000026;
+            Timer {
+                interval: 30ms;
+                running: root.rename-focus-pending;
+                triggered => {
+                    root.rename-focus-pending = false;
+                    rename-input.focus();
+                    rename-input.select-all();
+                }
+            }
+            VerticalLayout {
+                padding: 6px;
+                spacing: 2px;
+
+                if !root.menu-renaming: MenuRow {
+                    label: "Rename";
+                    clicked => {
+                        rename-input.text = root.menu-profile.name;
+                        root.menu-renaming = true;
+                        root.rename-focus-pending = true;
+                    }
+                }
+
+                Rectangle {
+                    height: root.menu-renaming ? 36px : 0px;
+                    visible: root.menu-renaming;
+                    border-radius: 8px;
+                    border-width: 1px;
+                    border-color: Theme.accent;
+                    rename-input := TextInput {
+                        x: 10px;
+                        width: parent.width - 20px;
+                        height: parent.height;
+                        enabled: root.menu-renaming;
+                        vertical-alignment: center;
+                        font-size: 13px;
+                        color: Theme.text;
+                        selection-background-color: Theme.accent-soft;
+                        selection-foreground-color: Theme.text;
+                        accepted => {
+                            root.rename-profile-id(root.menu-profile.id, self.text);
+                            root.menu-renaming = false;
+                            profile-menu.close();
+                            root.focus-input();
+                        }
+                        key-pressed(event) => {
+                            if (event.text == Key.Escape) {
+                                root.menu-renaming = false;
+                                profile-menu.close();
+                                root.focus-input();
+                                return accept;
+                            }
+                            reject
+                        }
+                    }
+                }
+
+                // Colour swatches: drawn 20 px (26 px with the ring) inside a 32 px target.
+                HorizontalLayout {
+                    height: 40px;
+                    alignment: center;
+                    for sw in root.swatches: Rectangle {
+                        width: 32px;
+                        height: 32px;
+                        Rectangle {
+                            width: 26px;
+                            height: 26px;
+                            border-radius: 13px;
+                            border-width: sw.colour == root.menu-profile.colour ? 2px : 0px;
+                            border-color: Theme.text;
+                            Rectangle {
+                                width: 20px;
+                                height: 20px;
+                                border-radius: 10px;
+                                background: sw.colour;
+                            }
+                        }
+                        TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => {
+                                root.set-profile-colour(root.menu-profile.id, sw.hex);
+                                profile-menu.close();
+                            }
+                        }
+                    }
+                }
+
+                if root.profiles.length > 1: MenuRow {
+                    label: !root.menu-delete-armed ? "Delete"
+                        : root.menu-profile.tasks == 0 ? "Delete " + root.menu-profile.name + "?"
+                        : root.menu-profile.tasks == 1 ? "Delete " + root.menu-profile.name + " and its task?"
+                        : "Delete " + root.menu-profile.name + " and its " + root.menu-profile.tasks + " tasks?";
+                    ink: Theme.danger;
+                    clicked => {
+                        if (root.menu-delete-armed) {
+                            root.menu-delete-armed = false;
+                            root.delete-profile-id(root.menu-profile.id);
+                            profile-menu.close();
+                        } else {
+                            root.menu-delete-armed = true;
+                        }
+                    }
+                }
             }
         }
     }

@@ -699,6 +699,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         shape: Cell::new([0; 3]),
         dark: Cell::new(theme::system_dark()),
     });
+    ui.set_swatches(ModelRc::new(VecModel::from(
+        theme::SWATCHES
+            .iter()
+            .filter_map(|hex| {
+                let c = theme::Rgb::parse(hex)?;
+                Some(Swatch { colour: slint::Color::from_rgb_u8(c.0, c.1, c.2), hex: (*hex).into() })
+            })
+            .collect::<Vec<_>>(),
+    )));
     app.refresh();
 
     let on = |f: fn(&Rc<App>)| {
@@ -817,16 +826,43 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     {
         let a = app.clone();
-        ui.on_rename_profile(move |name| {
-            a.state.borrow_mut().rename_profile(&name);
+        ui.on_rename_profile_id(move |id, name| {
+            a.state.borrow_mut().rename_profile_id(id as u32, &name);
             a.refresh();
             a.schedule_save();
         });
     }
-    ui.on_delete_profile(on(|a| {
-        a.state.borrow_mut().delete_profile();
-        a.switched();
-    }));
+    {
+        let a = app.clone();
+        // Undo restarts, so it can never bring back tasks of a profile that's gone.
+        ui.on_delete_profile_id(move |id| {
+            a.state.borrow_mut().delete_profile_id(id as u32);
+            a.switched();
+        });
+    }
+    {
+        let a = app.clone();
+        ui.on_set_profile_colour(move |id, hex| {
+            a.state.borrow_mut().set_profile_colour(id as u32, &hex);
+            a.refresh();
+            a.schedule_save();
+        });
+    }
+    {
+        let a = app.clone();
+        ui.on_drop_on_page(move |id, key| {
+            let Some(b) = Bucket::from_key(&key) else { return };
+            a.state.borrow_mut().move_to(id as u64, b, 0);
+            a.changed();
+        });
+    }
+    {
+        let a = app.clone();
+        ui.on_drop_on_profile(move |id, profile| {
+            a.state.borrow_mut().send_to(id as u64, profile as u32);
+            a.changed();
+        });
+    }
     {
         let a = app.clone();
         ui.on_send_task(move |id, profile| {

@@ -20,8 +20,13 @@ component SideRow inherits Rectangle {
     in property <string> label;
     in property <string> count;
     in property <bool> current;
-    // A dragged task is over this row.
-    in property <bool> highlight;
+    // A task is being dragged; positions are window coordinates.
+    in property <bool> drag-active;
+    in property <length> drag-x;
+    in property <length> drag-y;
+    out property <bool> over: root.drag-active && root.drag-x >= root.absolute-position.x
+        && root.drag-x < root.absolute-position.x + root.width && root.drag-y >= root.absolute-position.y
+        && root.drag-y < root.absolute-position.y + root.height;
     in property <color> dot: transparent;
     in property <string> icon;
     in property <color> icon-ink: Theme.text-muted;
@@ -31,7 +36,7 @@ component SideRow inherits Rectangle {
     callback right-clicked(length, length);
     height: 36px;
     border-radius: 18px;
-    background: root.current || root.highlight ? Theme.accent-soft : ta.has-hover ? Theme.hover : transparent;
+    background: root.current || root.over ? Theme.accent-soft : ta.has-hover ? Theme.hover : transparent;
     HorizontalLayout {
         padding-left: 12px;
         padding-right: 12px;
@@ -90,8 +95,14 @@ export component Sidebar inherits Rectangle {
     callback select-profile(int);
     callback select-page(string);
     callback add-profile(string);
-    // Profile id and pointer position in window coordinates.
-    callback profile-menu(int, length, length);
+    // The profile and the pointer position in window coordinates.
+    callback profile-menu(ProfileItem, length, length);
+    in property <bool> drag-active;
+    in property <length> drag-x;
+    in property <length> drag-y;
+    // What a dragged task is over: a bucket key or "", and a profile id or -1.
+    in-out property <string> drop-page;
+    in-out property <int> drop-profile: -1;
     callback start-move();
     // Hands keyboard focus back to the main area.
     callback done-naming();
@@ -137,11 +148,21 @@ export component Sidebar inherits Rectangle {
             label: p.name;
             dot: p.colour;
             current: p.current;
+            drag-active: root.drag-active && !p.current;
+            drag-x: root.drag-x;
+            drag-y: root.drag-y;
+            changed over => {
+                if (self.over) {
+                    root.drop-profile = p.id;
+                } else if (root.drop-profile == p.id) {
+                    root.drop-profile = -1;
+                }
+            }
             clicked => {
                 root.select-profile(p.id);
             }
             right-clicked(x, y) => {
-                root.profile-menu(p.id, x, y);
+                root.profile-menu(p, x, y);
             }
         }
 
@@ -217,6 +238,16 @@ export component Sidebar inherits Rectangle {
             current: b.current;
             icon: BucketIcons.of(b.key);
             icon-ink: Theme.strength(b.key);
+            drag-active: root.drag-active && !b.current;
+            drag-x: root.drag-x;
+            drag-y: root.drag-y;
+            changed over => {
+                if (self.over) {
+                    root.drop-page = b.key;
+                } else if (root.drop-page == b.key) {
+                    root.drop-page = "";
+                }
+            }
             clicked => {
                 root.select-page(b.key);
             }
